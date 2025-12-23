@@ -3,6 +3,7 @@ from flask_cors import CORS
 from PIL import Image
 from pillow_heif import register_heif_opener
 import os
+import html
 from datetime import datetime
 from pathlib import Path
 import hashlib
@@ -68,7 +69,43 @@ def serve_manage_page():
 
 @app.route('/photo/<image_id>', methods=['GET'])
 def serve_photo_page(image_id):
-    return send_from_directory(PAGE_DIR, 'photo.html')
+    payload = _build_image_payload(image_id)
+    if not payload:
+        return jsonify({'error': 'Image not found'}), 404
+
+    page_url = f"{request.url_root.rstrip('/')}/photo/{image_id}"
+    img_url = None
+    if payload.get("thumb"):
+        img_url = f"{request.url_root.rstrip('/')}{payload['thumb']}"
+    if not img_url:
+        if payload.get("avif"):
+            img_url = f"{request.url_root.rstrip('/')}{payload['avif']}"
+        elif payload.get("webp"):
+            img_url = f"{request.url_root.rstrip('/')}{payload['webp']}"
+
+    title = payload.get("datetime") or payload.get("date") or payload.get("id") or "Mio Gallery"
+    desc = payload.get("description") or "Photo from Mio Gallery"
+
+    meta_block = f"""
+  <meta property=\"og:type\" content=\"article\" />
+  <meta property=\"og:title\" content=\"{html.escape(title)}\" />
+  <meta property=\"og:description\" content=\"{html.escape(desc[:280])}\" />
+  {f'<meta property="og:image" content="{html.escape(img_url)}" />' if img_url else ''}
+  <meta property=\"og:url\" content=\"{html.escape(page_url)}\" />
+  <meta name=\"twitter:card\" content=\"summary_large_image\" />
+  <meta name=\"twitter:title\" content=\"{html.escape(title)}\" />
+  <meta name=\"twitter:description\" content=\"{html.escape(desc[:280])}\" />
+  {f'<meta name="twitter:image" content="{html.escape(img_url)}" />' if img_url else ''}
+  <link rel=\"canonical\" href=\"{html.escape(page_url)}\" />
+"""
+
+    try:
+        html_content = (PAGE_DIR / "photo.html").read_text(encoding="utf-8")
+        html_content = html_content.replace("<head>", "<head>\n" + meta_block, 1)
+    except Exception:
+        return jsonify({'error': 'Page unavailable'}), 500
+
+    return html_content
 
 
 @app.route('/manage-login', methods=['GET', 'POST'])
