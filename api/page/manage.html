@@ -356,24 +356,105 @@
         return;
       }
 
-      const form = new FormData();
-      for (const f of files) form.append("images", f);
+      const uploadBtn = document.getElementById("uploadBtn");
+      const refreshBtn = document.getElementById("refreshBtn");
+      const setUploadingUi = (uploading) => {
+        if (uploadBtn) uploadBtn.disabled = uploading;
+        if (refreshBtn) refreshBtn.disabled = uploading;
+        if (fileInput) fileInput.disabled = uploading;
+      };
 
-      try {
-        setStatus("Uploading…");
+      // Browser JS doesn't create OS threads, but we can upload multiple files concurrently
+      // by issuing multiple HTTP requests in parallel (concurrency-limited).
+      const DEFAULT_CONCURRENCY = Math.min(4, Math.max(2, Number(navigator.hardwareConcurrency || 4) >= 8 ? 4 : 3));
+      const concurrency = DEFAULT_CONCURRENCY;
+
+      async function uploadOneFile(file, attempt = 1) {
+        const form = new FormData();
+        // Backend accepts either 'image' (single) or 'images' (list). Use 'image' for per-file requests.
+        form.append("image", file);
+
         const resp = await fetch(new URL("/api/upload", API_BASE), {
           method: "POST",
           body: form,
         });
-        if (!resp.ok) {
-          const text = await resp.text().catch(() => "");
-          throw new Error(text);
+
+        if (resp.ok) {
+          // Try to parse JSON, but don't fail upload if response isn't JSON.
+          await resp.json().catch(() => null);
+          return { ok: true };
         }
+
+        // Retry once for transient errors.
+        const status = resp.status;
+        const text = await resp.text().catch(() => "");
+        const transient = status === 408 || status === 429 || (status >= 500 && status <= 599);
+        if (attempt < 2 && transient) {
+          await new Promise((r) => setTimeout(r, 500));
+          return uploadOneFile(file, attempt + 1);
+        }
+        return { ok: false, status, text };
+      }
+
+      async function runPool(items, workerFn, limit) {
+        const results = new Array(items.length);
+        let nextIndex = 0;
+        const workers = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
+          while (true) {
+            const i = nextIndex++;
+            if (i >= items.length) return;
+            results[i] = await workerFn(items[i], i);
+          }
+        });
+        await Promise.all(workers);
+        return results;
+      }
+
+      let completed = 0;
+      let succeeded = 0;
+      let failed = 0;
+
+      const updateProgress = () => {
+        setStatus(`Uploading… ${completed}/${files.length} (ok ${succeeded}, failed ${failed})`);
+      };
+
+      try {
+        setUploadingUi(true);
+        updateProgress();
+
+        const results = await runPool(
+          files,
+          async (file) => {
+            const r = await uploadOneFile(file);
+            completed += 1;
+            if (r.ok) succeeded += 1;
+            else {
+              failed += 1;
+              console.warn("Upload failed:", file?.name, r);
+            }
+            updateProgress();
+            return r;
+          },
+          concurrency
+        );
+
         fileInput.value = "";
         await loadList();
-        setStatus("Upload complete");
+
+        if (failed === 0) {
+          setStatus(`Upload complete (${succeeded}/${files.length})`);
+        } else if (succeeded === 0) {
+          setStatus(`Upload failed (${failed}/${files.length})`);
+        } else {
+          setStatus(`Upload partial: ok ${succeeded}, failed ${failed}`);
+        }
+
+        return results;
       } catch (e) {
+        console.error(e);
         setStatus("Upload failed");
+      } finally {
+        setUploadingUi(false);
       }
     };
 
