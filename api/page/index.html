@@ -270,6 +270,60 @@
       letter-spacing: -0.01em;
       white-space: pre-line;
     }
+
+    /* Responsive (iPhone + small screens) */
+    @media (max-width: 1024px) {
+      .gallery-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 768px) {
+      .page {
+        padding:
+          calc(18px + env(safe-area-inset-top))
+          calc(14px + env(safe-area-inset-right))
+          calc(44px + env(safe-area-inset-bottom))
+          calc(14px + env(safe-area-inset-left));
+      }
+      header {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .title { font-size: 24px; }
+      #manageBtn { width: 100%; }
+
+      .filters { gap: 12px; }
+      .filters .left { width: 100%; }
+      .input { flex: 1 1 140px; }
+      .input[type="text"] { min-width: 0 !important; flex: 1 1 100%; }
+      #clearFilters { width: 100%; }
+
+      .gallery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+      .card { padding: 14px; }
+    }
+
+    @media (max-width: 420px) {
+      .gallery-grid { grid-template-columns: 1fr; }
+      .photo { aspect-ratio: 3 / 2; }
+      .photo .caption { font-size: 12px; padding: 9px 10px; }
+
+      .lightbox { padding: 14px; }
+      .lightbox-content { max-width: 100%; max-height: 88vh; }
+      .lightbox .dl { left: 10px; top: 10px; }
+      .lightbox .close-btn,
+      .lightbox .nav-btn {
+        width: 42px;
+        height: 42px;
+        border-radius: 12px;
+      }
+      .lightbox .caption {
+        padding:
+          12px
+          14px
+          calc(12px + env(safe-area-inset-bottom))
+          14px;
+        font-size: 13px;
+      }
+    }
   </style>
 </head>
 <body>
