@@ -370,8 +370,9 @@ def _extract_datetime_from_id(image_id: str):
         return None
 
 def convert_and_save_image(image_path, output_dir, base_name):
-    """Convert image to WebP and AVIF formats"""
+    """Convert image to WebP and AVIF formats, limiting output to ~1MB"""
     results = {}
+    MAX_OUTPUT_SIZE = 1024 * 1024  # 1MB
     
     with Image.open(image_path) as img:
         # Convert to RGB if necessary (for transparency handling)
@@ -385,15 +386,31 @@ def convert_and_save_image(image_path, output_dir, base_name):
         elif img.mode != 'RGB':
             img = img.convert('RGB')
         
-        # Save as WebP
+        # Save as WebP with size limit
         webp_path = output_dir / f"{base_name}.webp"
-        img.save(webp_path, 'WEBP', quality=85, method=6)
+        quality = 70
+        while quality >= 50:
+            buf = BytesIO()
+            img.save(buf, 'WEBP', quality=quality, method=6)
+            size = buf.tell()
+            if size <= MAX_OUTPUT_SIZE or quality <= 50:
+                webp_path.write_bytes(buf.getvalue())
+                break
+            quality -= 5
         results['webp'] = str(webp_path.relative_to(PHOTO_DIR))
         
-        # Save as AVIF
+        # Save as AVIF with size limit
         try:
             avif_path = output_dir / f"{base_name}.avif"
-            img.save(avif_path, 'AVIF', quality=85)
+            quality = 80
+            while quality >= 50:
+                buf = BytesIO()
+                img.save(buf, 'AVIF', quality=quality)
+                size = buf.tell()
+                if size <= MAX_OUTPUT_SIZE or quality <= 50:
+                    avif_path.write_bytes(buf.getvalue())
+                    break
+                quality -= 5
             results['avif'] = str(avif_path.relative_to(PHOTO_DIR))
         except Exception as e:
             print(f"AVIF conversion failed: {e}. AVIF support may not be available.")
