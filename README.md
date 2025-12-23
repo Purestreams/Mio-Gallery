@@ -1,3 +1,7 @@
+![main page](image.png)
+
+Demo: [https://img.amiya.eu.org/](https://img.amiya.eu.org/) (no upload access)
+
 # Mio-Gallery
 
 A small self-hosted photo gallery (Flask + static HTML) with:
