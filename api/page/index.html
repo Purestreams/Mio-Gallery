@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en" data-rw-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mio's Gallery</title>
+
+  <!-- Rewind UI base styles (tokens/theme) -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/@rewind-ui/core/dist/rewind-ui.min.css"
+  />
+
+  <style>
+    :root {
+      --surface: #ffffff;
+      --border: #e5e7eb;
+      --muted: #6b7280;
+      --muted-strong: #374151;
+      --shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+    }
+    body {
+      margin: 0;
+      font-family: "Inter", system-ui, -apple-system, sans-serif;
+      background: #f8fafc;
+      color: var(--muted-strong);
+    }
+    .page {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 20px 64px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .title {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      color: var(--muted);
+      margin-top: 4px;
+      font-size: 15px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .filters {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .filters .left {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .input {
+      height: 40px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted-strong);
+      font-family: inherit;
+      font-size: 14px;
+      outline: none;
+    }
+    .input:focus {
+      border-color: var(--muted);
+    }
+    .btn {
+      height: 40px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted-strong);
+      cursor: pointer;
+      font-weight: 600;
+      transition: all 0.2s ease;
+    }
+    .btn:hover {
+      border-color: var(--muted);
+      transform: translateY(-1px);
+    }
+    .gallery-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr)); /* 4 columns */
+      gap: 16px;
+    }
+    .photo {
+      position: relative;
+      overflow: hidden;
+      border-radius: 12px;
+      cursor: zoom-in;
+      aspect-ratio: 4 / 3;
+      border: 1px solid var(--border);
+      background: #f1f5f9;
+    }
+    .photo img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transition: transform 0.3s ease;
+    }
+    .photo:hover img {
+      transform: scale(1.04);
+    }
+    .photo .caption {
+      position: absolute;
+      inset: auto 0 0 0;
+      padding: 10px 12px;
+      background: linear-gradient(180deg, transparent, rgba(0,0,0,0.55));
+      color: #f8fafc;
+      font-size: 13px;
+      letter-spacing: -0.01em;
+    }
+    .pagination {
+      margin-top: 18px;
+      display: flex;
+      justify-content: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .pg-btn {
+      min-width: 40px;
+      height: 40px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted-strong);
+      cursor: pointer;
+      font-weight: 600;
+      transition: all 0.2s ease;
+    }
+    .pg-btn:hover {
+      border-color: var(--muted);
+      color: var(--muted-strong);
+      transform: translateY(-1px);
+    }
+    .pg-btn[disabled] {
+      opacity: 0.4;
+      cursor: not-allowed;
+      transform: none;
+    }
+    .pg-btn.active {
+      background: var(--rw-color-primary-600, #2563eb);
+      color: #fff;
+      border-color: var(--rw-color-primary-600, #2563eb);
+      box-shadow: 0 8px 18px rgba(37, 99, 235, 0.25);
+    }
+
+    /* Lightbox */
+    .lightbox {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.9);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      z-index: 1000;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+    }
+    .lightbox.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .lightbox-content {
+      position: relative;
+      max-width: min(1100px, 92vw);
+      max-height: 86vh;
+      border-radius: 16px;
+      overflow: hidden;
+      background: #0b1220;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+    }
+    .lightbox img {
+      display: block;
+      max-width: 100%;
+      max-height: 86vh;
+      object-fit: contain;
+      background: #0b1220;
+    }
+    .lightbox .close-btn,
+    .lightbox .nav-btn {
+      position: absolute;
+      top: 12px;
+      width: 44px;
+      height: 44px;
+      border: none;
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.7);
+      color: #e5e7eb;
+      cursor: pointer;
+      font-size: 20px;
+      display: grid;
+      place-items: center;
+      transition: background 0.2s ease, transform 0.2s ease;
+    }
+    .lightbox .dl {
+      position: absolute;
+      left: 12px;
+      top: 12px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      z-index: 2;
+    }
+    .lightbox .dl select,
+    .lightbox .dl a {
+      height: 44px;
+      border-radius: 12px;
+      border: none;
+      background: rgba(15, 23, 42, 0.7);
+      color: #e5e7eb;
+      padding: 0 12px;
+      font-size: 14px;
+      cursor: pointer;
+      text-decoration: none;
+      display: grid;
+      place-items: center;
+    }
+    .lightbox .dl select {
+      appearance: none;
+      padding-right: 28px;
+    }
+    .lightbox .dl select:hover,
+    .lightbox .dl a:hover {
+      background: rgba(37, 99, 235, 0.9);
+      transform: translateY(-1px);
+    }
+    .lightbox .close-btn { right: 12px; }
+    .lightbox .nav-btn { top: calc(50% - 22px); }
+    .lightbox .nav-btn.prev { left: 12px; }
+    .lightbox .nav-btn.next { right: 12px; }
+    .lightbox .close-btn:hover,
+    .lightbox .nav-btn:hover {
+      background: rgba(37, 99, 235, 0.9);
+      transform: translateY(-1px);
+    }
+    .lightbox .caption {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      padding: 14px 18px;
+      background: linear-gradient(180deg, transparent, rgba(0,0,0,0.7));
+      color: #e5e7eb;
+      font-size: 14px;
+      letter-spacing: -0.01em;
+      white-space: pre-line;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div>
+        <div class="title">Mio's Gallery</div>
+        <div class="subtitle">Keep the memories.</div>
+      </div>
+      <button class="btn" id="manageBtn">Manage</button>
+    </header>
+
+    <div class="card">
+      <div class="filters">
+        <div class="left">
+          <input class="input" id="startDate" type="date" />
+          <input class="input" id="endDate" type="date" />
+          <input class="input" id="descSearch" type="text" placeholder="Search description" style="min-width: 240px" />
+          <button class="btn" id="clearFilters">Clear</button>
+        </div>
+      </div>
+      <div class="gallery-grid" id="gallery"></div>
+      <div class="pagination" id="pagination"></div>
+    </div>
+  </div>
+
+  <!-- Lightbox -->
+  <div class="lightbox" id="lightbox">
+    <div class="lightbox-content">
+      <div class="dl">
+        <select id="downloadFormat" aria-label="Download format">
+          <option value="avif">AVIF</option>
+          <option value="jpg">JPG</option>
+        </select>
+        <a id="downloadBtn" href="#" rel="noopener">Download</a>
+      </div>
+      <button class="close-btn" id="closeLightbox" aria-label="Close">&times;</button>
+      <button class="nav-btn prev" id="prevLightbox" aria-label="Previous">&#8249;</button>
+      <img id="lightboxImg" alt="Selected photo" />
+      <button class="nav-btn next" id="nextLightbox" aria-label="Next">&#8250;</button>
+      <div class="caption" id="lightboxCaption"></div>
+    </div>
+  </div>
+
+  <script>
+    // API base (same origin as this page)
+    const API_BASE = window.location.origin;
+
+    let photos = [];
+    let viewPhotos = [];
+
+    const pageSize = 12; // 4 x 3
+    let currentPage = 1;
+    let currentIndex = 0;
+
+    const galleryEl = document.getElementById("gallery");
+    const paginationEl = document.getElementById("pagination");
+    const lightboxEl = document.getElementById("lightbox");
+    const lightboxImg = document.getElementById("lightboxImg");
+    const lightboxCaption = document.getElementById("lightboxCaption");
+    const downloadFormatEl = document.getElementById("downloadFormat");
+    const downloadBtnEl = document.getElementById("downloadBtn");
+
+    const startDateEl = document.getElementById("startDate");
+    const endDateEl = document.getElementById("endDate");
+    const descSearchEl = document.getElementById("descSearch");
+
+    function absUrl(path) {
+      if (!path) return null;
+      return new URL(path, API_BASE).toString();
+    }
+
+    function pickPreferredSrc(photo) {
+      // Prefer AVIF; fall back to WebP.
+      const avif = absUrl(photo.avif);
+      const webp = absUrl(photo.webp);
+      return { src: avif || webp, fallback: webp };
+    }
+
+    function pickThumbSrc(photo) {
+      const thumb = absUrl(photo.thumb);
+      return thumb;
+    }
+
+    function applyAvifFallback(imgEl, fallbackUrl) {
+      if (!fallbackUrl) return;
+      const handler = () => {
+        imgEl.removeEventListener("error", handler);
+        if (imgEl.src !== fallbackUrl) imgEl.src = fallbackUrl;
+      };
+      imgEl.addEventListener("error", handler);
+    }
+
+    function truncateWords(text, maxWords) {
+      const t = (text || "").toString().trim();
+      if (!t) return "";
+      const words = t.split(/\s+/).filter(Boolean);
+      if (words.length <= maxWords) return t;
+      return words.slice(0, maxWords).join(" ") + "…";
+    }
+
+    function buildListUrl() {
+      const url = new URL("/api/images", API_BASE);
+      const start = (startDateEl.value || "").trim();
+      const end = (endDateEl.value || "").trim();
+      if (start) url.searchParams.set("start_date", start);
+      if (end) url.searchParams.set("end_date", end);
+      return url.toString();
+    }
+
+    function applyFilters() {
+      const q = (descSearchEl.value || "").toString().trim().toLowerCase();
+      if (!q) {
+        viewPhotos = photos.slice();
+      } else {
+        viewPhotos = photos.filter((p) => {
+          const d = (p.description || "").toString().toLowerCase();
+          return d.includes(q);
+        });
+      }
+      currentPage = 1;
+      renderGallery();
+    }
+
+    async function loadPhotos() {
+      galleryEl.innerHTML = "Loading…";
+      try {
+        const resp = await fetch(buildListUrl());
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        photos = Array.isArray(data.images) ? data.images : [];
+        applyFilters();
+      } catch (e) {
+        galleryEl.innerHTML = "Failed to load photos. Is the API running?";
+        paginationEl.innerHTML = "";
+      }
+    }
+
+    function renderGallery() {
+      const start = (currentPage - 1) * pageSize;
+      const end = start + pageSize;
+      galleryEl.innerHTML = "";
+      viewPhotos.slice(start, end).forEach((photo, idx) => {
+        const itemIndex = start + idx;
+        const div = document.createElement("div");
+        div.className = "photo";
+        const { src: fullSrc, fallback } = pickPreferredSrc(photo);
+        const thumbSrc = pickThumbSrc(photo) || fullSrc;
+        const captionDate = photo.datetime || photo.date || photo.id || "";
+        const shortDesc = truncateWords(photo.description, 8);
+        const caption = shortDesc ? `${captionDate} — ${shortDesc}` : captionDate;
+        div.innerHTML = `
+          <img src="${thumbSrc || ""}" alt="${caption}" loading="lazy" />
+          <div class="caption">${caption}</div>
+        `;
+        const img = div.querySelector("img");
+        applyAvifFallback(img, fallback);
+        div.onclick = () => openLightbox(itemIndex);
+        galleryEl.appendChild(div);
+      });
+      renderPagination();
+    }
+
+    function renderPagination() {
+      const totalPages = Math.ceil(viewPhotos.length / pageSize);
+      paginationEl.innerHTML = "";
+      if (totalPages <= 1) return;
+
+      const makeBtn = (label, page, disabled = false, active = false) => {
+        const btn = document.createElement("button");
+        btn.className = "pg-btn" + (active ? " active" : "");
+        btn.textContent = label;
+        btn.disabled = disabled;
+        btn.onclick = () => {
+          currentPage = page;
+          renderGallery();
+        };
+        return btn;
+      };
+
+      paginationEl.appendChild(makeBtn("«", currentPage - 1, currentPage === 1));
+      for (let p = 1; p <= totalPages; p++) {
+        paginationEl.appendChild(makeBtn(p, p, false, p === currentPage));
+      }
+      paginationEl.appendChild(makeBtn("»", currentPage + 1, currentPage === totalPages));
+    }
+
+    function openLightbox(index) {
+      currentIndex = index;
+      const photo = viewPhotos[index];
+      const { src, fallback } = pickPreferredSrc(photo);
+      lightboxImg.src = src || "";
+      applyAvifFallback(lightboxImg, fallback);
+      const dt = photo.datetime || photo.date || photo.id || "";
+      const desc = (photo.description || "").toString().trim();
+      lightboxCaption.textContent = desc ? `${dt}\n${desc}` : dt;
+
+      const updateDownload = () => {
+        const fmt = (downloadFormatEl.value || "avif").toLowerCase();
+        const url = new URL(`/api/images/${encodeURIComponent(photo.id)}/download`, API_BASE);
+        url.searchParams.set("format", fmt);
+        downloadBtnEl.href = url.toString();
+      };
+      updateDownload();
+      downloadFormatEl.onchange = updateDownload;
+
+      lightboxEl.classList.add("open");
+    }
+
+    function closeLightbox() {
+      lightboxEl.classList.remove("open");
+      lightboxImg.src = "";
+    }
+
+    function navLightbox(delta) {
+      if (!viewPhotos.length) return;
+      currentIndex = (currentIndex + delta + viewPhotos.length) % viewPhotos.length;
+      openLightbox(currentIndex);
+    }
+
+    startDateEl.addEventListener("change", loadPhotos);
+    endDateEl.addEventListener("change", loadPhotos);
+    descSearchEl.addEventListener("input", applyFilters);
+    document.getElementById("clearFilters").onclick = () => {
+      startDateEl.value = "";
+      endDateEl.value = "";
+      descSearchEl.value = "";
+      loadPhotos();
+    };
+
+    document.getElementById("closeLightbox").onclick = closeLightbox;
+    document.getElementById("prevLightbox").onclick = () => navLightbox(-1);
+    document.getElementById("nextLightbox").onclick = () => navLightbox(1);
+    document.getElementById("manageBtn").onclick = () => {
+      window.location.href = "/manage";
+    };
+    lightboxEl.addEventListener("click", (e) => {
+      if (e.target === lightboxEl) closeLightbox();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (!lightboxEl.classList.contains("open")) return;
+      if (e.key === "Escape") closeLightbox();
+      if (e.key === "ArrowLeft") navLightbox(-1);
+      if (e.key === "ArrowRight") navLightbox(1);
+    });
+
+    loadPhotos();
+  </script>
+</body>
+</html>

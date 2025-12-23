@@ -1,0 +1,12 @@
+Flask>=3.0.0
+Flask-CORS>=4.0.0
+Werkzeug>=3.0.1
+
+# Python 3.13: use newer Pillow wheels (older pinned versions often fail to build).
+Pillow>=11.0.0
+
+# iPhone HEIC/HEIF decoding
+pillow-heif>=0.18.0
+
+# Enable AVIF save/load support for Pillow (preferred over relying on system libs)
+pillow-avif-plugin>=1.4.0

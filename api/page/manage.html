@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en" data-rw-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Manage Gallery</title>
+
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/@rewind-ui/core/dist/rewind-ui.min.css"
+  />
+
+  <style>
+    :root {
+      --surface: #ffffff;
+      --border: #e5e7eb;
+      --muted: #6b7280;
+      --muted-strong: #374151;
+      --shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+    }
+    body {
+      margin: 0;
+      font-family: "Inter", system-ui, -apple-system, sans-serif;
+      background: #f8fafc;
+      color: var(--muted-strong);
+    }
+    .page {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 20px 64px;
+    }
+    header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .title {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      color: var(--muted);
+      margin-top: 4px;
+      font-size: 15px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px 18px;
+      box-shadow: var(--shadow);
+    }
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .left {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    input[type="file"] {
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+    .btn {
+      height: 40px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted-strong);
+      cursor: pointer;
+      font-weight: 700;
+      transition: all 0.2s ease;
+    }
+    .btn:hover {
+      border-color: var(--muted);
+      transform: translateY(-1px);
+    }
+    .btn.primary {
+      background: var(--rw-color-primary-600, #2563eb);
+      color: #fff;
+      border-color: var(--rw-color-primary-600, #2563eb);
+    }
+    .btn.danger {
+      background: #fff;
+      color: #b91c1c;
+      border-color: #fecaca;
+    }
+    .btn.danger:hover {
+      border-color: #fca5a5;
+    }
+    .status {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+    }
+    .item {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      background: #fff;
+    }
+    .thumb {
+      position: relative;
+      aspect-ratio: 4 / 3;
+      background: #f1f5f9;
+      overflow: hidden;
+    }
+    .thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .meta {
+      padding: 10px 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .label {
+      font-size: 13px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+    }
+    .small {
+      height: 34px;
+      padding: 0 10px;
+      border-radius: 10px;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .desc {
+      width: 100%;
+      min-height: 78px;
+      resize: vertical;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+      color: var(--muted-strong);
+      font-family: inherit;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div>
+        <div class="title">Manage Gallery</div>
+        <div class="subtitle">Upload, pin, and delete images.</div>
+      </div>
+      <div class="left">
+        <button class="btn" id="backBtn">Back</button>
+        <div class="status" id="status"></div>
+      </div>
+    </header>
+
+    <div class="card">
+      <div class="toolbar">
+        <div class="left">
+          <input id="fileInput" type="file" multiple accept="image/*" />
+          <button class="btn primary" id="uploadBtn">Upload</button>
+          <button class="btn" id="refreshBtn">Refresh</button>
+        </div>
+      </div>
+
+      <div class="grid" id="grid"></div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = window.location.origin;
+
+    const statusEl = document.getElementById("status");
+    const gridEl = document.getElementById("grid");
+    const fileInput = document.getElementById("fileInput");
+
+    function setStatus(text) {
+      statusEl.textContent = text || "";
+    }
+
+    function absUrl(path) {
+      if (!path) return null;
+      return new URL(path, API_BASE).toString();
+    }
+
+    function pickPreferredSrc(photo) {
+      const avif = absUrl(photo.avif);
+      const webp = absUrl(photo.webp);
+      return { src: avif || webp, fallback: webp };
+    }
+
+    function pickThumbSrc(photo) {
+      return absUrl(photo.thumb);
+    }
+
+    function applyAvifFallback(imgEl, fallbackUrl) {
+      if (!fallbackUrl) return;
+      const handler = () => {
+        imgEl.removeEventListener("error", handler);
+        if (imgEl.src !== fallbackUrl) imgEl.src = fallbackUrl;
+      };
+      imgEl.addEventListener("error", handler);
+    }
+
+    async function apiJson(path, options) {
+      const resp = await fetch(new URL(path, API_BASE), options);
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        throw new Error(`HTTP ${resp.status} ${text}`);
+      }
+      if (resp.status === 204) return null;
+      return await resp.json();
+    }
+
+    async function loadList() {
+      setStatus("Loading…");
+      gridEl.innerHTML = "";
+      try {
+        const data = await apiJson("/api/images");
+        const images = Array.isArray(data.images) ? data.images : [];
+        render(images);
+        setStatus(`${images.length} images`);
+      } catch (e) {
+        setStatus("Failed to load. Is the API running?");
+      }
+    }
+
+    function render(images) {
+      gridEl.innerHTML = "";
+      if (!images.length) {
+        gridEl.innerHTML = "No images.";
+        return;
+      }
+
+      for (const photo of images) {
+        const div = document.createElement("div");
+        div.className = "item";
+
+        const { src: fullSrc, fallback } = pickPreferredSrc(photo);
+        const thumbSrc = pickThumbSrc(photo) || fullSrc;
+        const caption = photo.date || photo.id || "";
+        const description = (photo.description || "").toString();
+
+        div.innerHTML = `
+          <div class="thumb"><img alt="${caption}" loading="lazy" /></div>
+          <div class="meta">
+            <div class="row">
+              <div class="label">${caption}${photo.pinned ? " (pinned)" : ""}</div>
+            </div>
+            <div class="row">
+              <textarea class="desc" placeholder="Description…">${description.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</textarea>
+            </div>
+            <div class="row">
+              <div class="actions">
+                <button class="btn small" data-action="pin">${photo.pinned ? "Unpin" : "Pin"}</button>
+                <button class="btn small" data-action="save">Save</button>
+                <button class="btn small danger" data-action="delete">Delete</button>
+              </div>
+            </div>
+          </div>
+        `;
+
+          const img = div.querySelector("img");
+          img.src = thumbSrc || "";
+        applyAvifFallback(img, fallback);
+
+        div.querySelector('[data-action="pin"]').onclick = async () => {
+          try {
+            setStatus("Updating…");
+            await apiJson(`/api/images/${encodeURIComponent(photo.id)}/pin`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ pinned: !photo.pinned }),
+            });
+            await loadList();
+          } catch (e) {
+            setStatus("Pin failed");
+          }
+        };
+
+        div.querySelector('[data-action="save"]').onclick = async () => {
+          const textarea = div.querySelector("textarea.desc");
+          const newDesc = (textarea?.value || "").toString();
+          try {
+            setStatus("Saving…");
+            await apiJson(`/api/images/${encodeURIComponent(photo.id)}/description`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ description: newDesc }),
+            });
+            await loadList();
+            setStatus("Saved");
+          } catch (e) {
+            setStatus("Save failed");
+          }
+        };
+
+        div.querySelector('[data-action="delete"]').onclick = async () => {
+          if (!confirm("Delete this image?")) return;
+          try {
+            setStatus("Deleting…");
+            await apiJson(`/api/images/${encodeURIComponent(photo.id)}`, { method: "DELETE" });
+            await loadList();
+          } catch (e) {
+            setStatus("Delete failed");
+          }
+        };
+
+        gridEl.appendChild(div);
+      }
+    }
+
+    document.getElementById("refreshBtn").onclick = loadList;
+    document.getElementById("backBtn").onclick = () => {
+      window.location.href = "/";
+    };
+
+    document.getElementById("uploadBtn").onclick = async () => {
+      const files = Array.from(fileInput.files || []);
+      if (!files.length) {
+        setStatus("Select files first");
+        return;
+      }
+
+      const form = new FormData();
+      for (const f of files) form.append("images", f);
+
+      try {
+        setStatus("Uploading…");
+        const resp = await fetch(new URL("/api/upload", API_BASE), {
+          method: "POST",
+          body: form,
+        });
+        if (!resp.ok) {
+          const text = await resp.text().catch(() => "");
+          throw new Error(text);
+        }
+        fileInput.value = "";
+        await loadList();
+        setStatus("Upload complete");
+      } catch (e) {
+        setStatus("Upload failed");
+      }
+    };
+
+    loadList();
+  </script>
+</body>
+</html>
