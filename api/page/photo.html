@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en" data-rw-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Photo · Mio's Gallery</title>
+  <link rel="stylesheet" href="https://unpkg.com/@rewind-ui/core/dist/rewind-ui.min.css" />
+  <style>
+    :root {
+      --surface: #ffffff;
+      --border: #e5e7eb;
+      --muted: #6b7280;
+      --muted-strong: #1f2937;
+      --shadow: 0 12px 36px rgba(15, 23, 42, 0.14);
+      --accent: var(--rw-color-primary-600, #2563eb);
+    }
+    body {
+      margin: 0;
+      font-family: "Inter", system-ui, -apple-system, sans-serif;
+      background: #f8fafc;
+      color: var(--muted-strong);
+    }
+    .page {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 28px 18px 56px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .title {
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+    .subtitle { color: var(--muted); font-size: 14px; }
+    .btn {
+      height: 40px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted-strong);
+      cursor: pointer;
+      font-weight: 600;
+      transition: all 0.2s ease;
+    }
+    .btn:hover { border-color: var(--muted); transform: translateY(-1px); }
+    .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); box-shadow: 0 10px 24px rgba(37, 99, 235, 0.22); }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .hero {
+      position: relative;
+      background: #0b1220;
+      display: grid;
+      place-items: center;
+      min-height: 320px;
+    }
+    .hero img {
+      width: 100%;
+      max-height: 72vh;
+      object-fit: contain;
+      display: block;
+      background: #d6d7d9;
+    }
+    .content {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+    .meta { display: flex; flex-direction: column; gap: 6px; }
+    .meta .when { color: var(--muted); font-size: 14px; }
+    .desc {
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      color: var(--muted-strong);
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .actions .btn,
+    .actions a,
+    .actions select {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 40px;
+      line-height: 1;
+    }
+    select.input {
+      height: 40px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted-strong);
+      font-family: inherit;
+      font-size: 14px;
+    }
+    .status {
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: #f1f5f9;
+      color: var(--muted-strong);
+      text-align: center;
+    }
+    .muted { color: var(--muted); }
+    .toast {
+      position: fixed;
+      bottom: 18px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #111827;
+      color: #f9fafb;
+      padding: 12px 16px;
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.24);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, -4px); }
+    @media (max-width: 640px) {
+      .title { font-size: 22px; }
+      header { flex-direction: column; align-items: stretch; }
+      .actions { flex-direction: column; align-items: stretch; }
+      .actions .btn, .actions select { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div>
+        <div class="title">Photo</div>
+        <div class="subtitle">Details and sharing</div>
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn" id="backBtn">← Back to gallery</button>
+        <button class="btn" id="manageBtn">Manage</button>
+      </div>
+    </header>
+
+    <div class="card" id="card">
+      <div class="hero">
+        <img id="photoImg" alt="Photo" />
+      </div>
+      <div class="content">
+        <div class="meta">
+          <div class="when" id="photoWhen"></div>
+          <div class="title" id="photoTitle"></div>
+        </div>
+        <div class="desc" id="photoDesc"></div>
+        <div class="actions">
+          <select class="input" id="downloadFormat" aria-label="Download format">
+            <option value="avif">Download AVIF</option>
+            <option value="jpg">Download JPG</option>
+          </select>
+          <a class="btn primary" id="downloadBtn" href="#" rel="noopener">Download</a>
+          <button class="btn" id="shareBtn">Share link</button>
+          <a class="btn" id="openRaw" href="#" target="_blank" rel="noopener">Open original</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="status" id="status" style="display:none;"></div>
+  </div>
+
+  <div class="toast" id="toast">Link copied</div>
+
+  <script>
+    const API_BASE = window.location.origin;
+    const imageId = decodeURIComponent(window.location.pathname.split("/").pop() || "");
+
+    const imgEl = document.getElementById("photoImg");
+    const titleEl = document.getElementById("photoTitle");
+    const whenEl = document.getElementById("photoWhen");
+    const descEl = document.getElementById("photoDesc");
+    const statusEl = document.getElementById("status");
+    const downloadFormatEl = document.getElementById("downloadFormat");
+    const downloadBtn = document.getElementById("downloadBtn");
+    const shareBtn = document.getElementById("shareBtn");
+    const openRawBtn = document.getElementById("openRaw");
+
+    function absUrl(path) {
+      if (!path) return null;
+      return new URL(path, API_BASE).toString();
+    }
+
+    function pickPreferredSrc(photo) {
+      const avif = absUrl(photo.avif);
+      const webp = absUrl(photo.webp);
+      return { src: avif || webp, fallback: webp };
+    }
+
+    function applyAvifFallback(el, fallbackUrl) {
+      if (!fallbackUrl) return;
+      const handler = () => {
+        el.removeEventListener("error", handler);
+        if (el.src !== fallbackUrl) el.src = fallbackUrl;
+      };
+      el.addEventListener("error", handler);
+    }
+
+    function showStatus(msg) {
+      statusEl.style.display = "block";
+      statusEl.textContent = msg;
+    }
+
+    function hideStatus() {
+      statusEl.style.display = "none";
+      statusEl.textContent = "";
+    }
+
+    function showToast(msg) {
+      const toast = document.getElementById("toast");
+      toast.textContent = msg;
+      toast.classList.add("show");
+      setTimeout(() => toast.classList.remove("show"), 1600);
+    }
+
+    function updateDownloadLink(photo) {
+      const fmt = (downloadFormatEl.value || "avif").toLowerCase();
+      const url = new URL(`/api/images/${encodeURIComponent(photo.id)}/download`, API_BASE);
+      url.searchParams.set("format", fmt);
+      downloadBtn.href = url.toString();
+      downloadBtn.textContent = fmt === "jpg" ? "Download JPG" : "Download AVIF";
+    }
+
+    async function copyLink() {
+      const link = window.location.href;
+      if (navigator.share) {
+        try {
+          await navigator.share({ title: "Mio's Gallery", url: link });
+          return;
+        } catch (e) {
+          // fall through to clipboard
+        }
+      }
+      try {
+        await navigator.clipboard.writeText(link);
+        showToast("Link copied");
+      } catch (e) {
+        showToast("Copy failed");
+      }
+    }
+
+    async function loadPhoto() {
+      if (!imageId) {
+        showStatus("Missing image id in URL.");
+        return;
+      }
+      showStatus("Loading photo…");
+      try {
+        const resp = await fetch(`/api/images/${encodeURIComponent(imageId)}`);
+        if (!resp.ok) {
+          showStatus("Photo not found.");
+          return;
+        }
+        const photo = await resp.json();
+        hideStatus();
+
+        const { src, fallback } = pickPreferredSrc(photo);
+        imgEl.src = src || "";
+        applyAvifFallback(imgEl, fallback);
+
+        const when = photo.datetime || photo.date || photo.id || "";
+        whenEl.textContent = when;
+        titleEl.textContent = photo.id || "Photo";
+        descEl.textContent = (photo.description || "No description provided.").trim();
+
+        downloadFormatEl.onchange = () => updateDownloadLink(photo);
+        updateDownloadLink(photo);
+
+        const original = photo.avif || photo.webp;
+        if (original) {
+          openRawBtn.href = absUrl(original);
+          openRawBtn.style.display = "inline-flex";
+        } else {
+          openRawBtn.style.display = "none";
+        }
+
+        shareBtn.onclick = copyLink;
+      } catch (e) {
+        showStatus("Failed to load photo.");
+      }
+    }
+
+    document.getElementById("backBtn").onclick = () => {
+      window.location.href = "/";
+    };
+    document.getElementById("manageBtn").onclick = () => {
+      window.location.href = "/manage";
+    };
+
+    loadPhoto();
+  </script>
+</body>
+</html>

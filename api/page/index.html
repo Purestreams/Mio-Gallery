@@ -244,7 +244,8 @@
       z-index: 2;
     }
     .lightbox .dl select,
-    .lightbox .dl a {
+    .lightbox .dl a,
+    .lightbox .dl button {
       height: 44px;
       border-radius: 12px;
       border: none;
@@ -262,7 +263,8 @@
       padding-right: 28px;
     }
     .lightbox .dl select:hover,
-    .lightbox .dl a:hover {
+    .lightbox .dl a:hover,
+    .lightbox .dl button:hover {
       background: rgba(37, 99, 235, 0.9);
       transform: translateY(-1px);
     }
@@ -381,6 +383,7 @@
           <option value="jpg">JPG</option>
         </select>
         <a id="downloadBtn" href="#" rel="noopener">Download</a>
+        <a id="shareBtn" href="#" rel="noopener">Share</a>
       </div>
       <button class="close-btn" id="closeLightbox" aria-label="Close">&times;</button>
       <button class="nav-btn prev" id="prevLightbox" aria-label="Previous">&#8249;</button>
@@ -408,6 +411,7 @@
     const lightboxCaption = document.getElementById("lightboxCaption");
     const downloadFormatEl = document.getElementById("downloadFormat");
     const downloadBtnEl = document.getElementById("downloadBtn");
+    const shareBtnEl = document.getElementById("shareBtn");
 
     const startDateEl = document.getElementById("startDate");
     const endDateEl = document.getElementById("endDate");
@@ -551,6 +555,19 @@
       };
       updateDownload();
       downloadFormatEl.onchange = updateDownload;
+
+      const detailUrl = new URL(`/photo/${encodeURIComponent(photo.id)}`, API_BASE).toString();
+      shareBtnEl.href = detailUrl;
+      shareBtnEl.onclick = (e) => {
+        e.preventDefault();
+        if (navigator.share) {
+          navigator.share({ title: "Mio's Gallery", url: detailUrl }).catch(() => {
+            window.location.href = detailUrl;
+          });
+        } else {
+          window.location.href = detailUrl;
+        }
+      };
 
       lightboxEl.classList.add("open");
     }

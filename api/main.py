@@ -66,6 +66,11 @@ def serve_manage_page():
         return send_from_directory(PAGE_DIR, 'manage.html')
 
 
+@app.route('/photo/<image_id>', methods=['GET'])
+def serve_photo_page(image_id):
+    return send_from_directory(PAGE_DIR, 'photo.html')
+
+
 @app.route('/manage-login', methods=['GET', 'POST'])
 def manage_login():
         error = ""
@@ -368,6 +373,56 @@ def _extract_datetime_from_id(image_id: str):
         return datetime.strptime(f"{parts[0]}_{parts[1]}", "%Y%m%d_%H%M%S")
     except Exception:
         return None
+
+
+def _build_image_payload(image_id: str) -> dict | None:
+    """Best-effort metadata for a single image id."""
+    files = _find_files_by_id(image_id)
+    if not files:
+        return None
+
+    meta = _load_meta()
+    pinned_map = meta.get("pinned", {}) if isinstance(meta, dict) else {}
+    datetime_map = meta.get("datetime", {}) if isinstance(meta, dict) else {}
+
+    dt_str = datetime_map.get(image_id) if isinstance(datetime_map, dict) else None
+    dt_obj = None
+    if dt_str:
+        try:
+            dt_obj = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            dt_obj = None
+    if not dt_obj:
+        dt_obj = _extract_datetime_from_id(image_id)
+    if dt_obj and not dt_str:
+        dt_str = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
+
+    src = _pick_source_file(image_id)
+    date_str = dt_obj.strftime("%Y-%m-%d") if dt_obj else None
+    if not date_str and src and src.exists():
+        date_str = datetime.fromtimestamp(src.stat().st_mtime).strftime("%Y-%m-%d")
+
+    def _rel(p: Path | None) -> str | None:
+        if not p:
+            return None
+        try:
+            return f"/api/images/{p.relative_to(PHOTO_DIR)}"
+        except Exception:
+            return None
+
+    webp = next((p for p in files if p.suffix.lower() == ".webp"), None)
+    avif = next((p for p in files if p.suffix.lower() == ".avif"), None)
+
+    return {
+        "id": image_id,
+        "date": date_str,
+        "datetime": dt_str,
+        "thumb": f"/api/thumb/{image_id}.webp",
+        "webp": _rel(webp),
+        "avif": _rel(avif),
+        "pinned": bool(pinned_map.get(image_id, False)),
+        "description": _load_description(image_id),
+    }
 
 def convert_and_save_image(image_path, output_dir, base_name):
     """Convert image to WebP and AVIF formats, limiting output to ~1MB"""
@@ -693,6 +748,14 @@ def image_description(image_id):
         desc = ''
     _save_description(image_id, str(desc))
     return jsonify({'id': image_id, 'description': _load_description(image_id)}), 200
+
+
+@app.route('/api/images/<image_id>', methods=['GET'])
+def get_image(image_id):
+    payload = _build_image_payload(image_id)
+    if not payload:
+        return jsonify({'error': 'Image not found'}), 404
+    return jsonify(payload), 200
 
 
 @app.route('/api/images/<image_id>', methods=['DELETE'])
