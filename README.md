@@ -50,7 +50,7 @@ Then open:
 The admin page uses a simple session cookie.
 
 Environment variables:
-- `MIO_GALLERY_PASSWORD` — manage password (default: `zhu123`)
+- `MIO_GALLERY_PASSWORD` — manage password (default: `Admin123`)
 - `MIO_GALLERY_SECRET` — Flask session secret (default: `dev-secret-change-me`)
 
 Example:
