@@ -4,6 +4,8 @@ from PIL import Image
 from pillow_heif import register_heif_opener
 import os
 import html
+import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from pathlib import Path
 import hashlib
@@ -11,6 +13,7 @@ import json
 from werkzeug.utils import secure_filename
 from PIL import ExifTags
 from io import BytesIO
+from werkzeug.exceptions import HTTPException
 
 try:
     import pillow_avif  # noqa: F401
@@ -38,6 +41,22 @@ THUMB_DIR.mkdir(parents=True, exist_ok=True)
 DOWNLOAD_DIR = PHOTO_DIR / "download"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 PAGE_DIR = BASE_DIR / "page"
+
+# Logging setup
+LOG_DIR = REPO_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+def _init_logging():
+    handler = RotatingFileHandler(LOG_DIR / "server.log", maxBytes=1_000_000, backupCount=3)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    handler.setFormatter(fmt)
+    # Ensure we don't add duplicate handlers if reloaded
+    existing = [h for h in app.logger.handlers if isinstance(h, RotatingFileHandler)]
+    if not existing:
+        app.logger.addHandler(handler)
+    app.logger.setLevel(logging.INFO)
+
+_init_logging()
 
 ADMIN_PASSWORD = os.environ.get("MIO_GALLERY_PASSWORD", "Admin123")
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'webp', 'heic', 'heif'}
@@ -900,3 +919,26 @@ def health_check():
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5088)
+
+# Global error handler to log crashes and return consistent responses
+@app.errorhandler(Exception)
+def _handle_exception(e):
+    # HTTP errors: log and return as JSON for API routes; preserve HTML for pages
+    if isinstance(e, HTTPException):
+        try:
+            app.logger.warning("HTTPException %s on %s %s: %s", e.code, request.method, request.path, e.description)
+        except Exception:
+            pass
+        if request.path.startswith('/api/'):
+            return jsonify({'error': e.name.lower().replace(' ', '_'), 'message': e.description}), e.code
+        return e
+
+    # Unhandled exceptions: log stack trace
+    try:
+        app.logger.exception("Unhandled exception on %s %s", request.method, request.path)
+    except Exception:
+        pass
+
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'internal_error', 'message': 'Server error'}), 500
+    return "Internal Server Error", 500
