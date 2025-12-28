@@ -25,6 +25,7 @@
       --accent: var(--rw-color-primary-400, #60a5fa);
       --bg: #0b1220;
       --text: #e2e8f0;
+      --hero-bg: #0b1220;
     }
     body {
       margin: 0;
@@ -72,7 +73,7 @@
     }
     .hero {
       position: relative;
-      background: #d6d7d9;
+      background: var(--hero-bg, #d6d7d9);
       display: grid;
       place-items: center;
       min-height: 320px;
@@ -82,7 +83,7 @@
       max-height: 72vh;
       object-fit: contain;
       display: block;
-      background: #d6d7d9;
+      background: var(--hero-bg, #d6d7d9);
     }
     .content {
       padding: 18px;
@@ -92,7 +93,7 @@
     .meta { display: flex; flex-direction: column; gap: 6px; }
     .meta .when { color: var(--muted); font-size: 14px; }
     .desc {
-      background: #f8fafc;
+      background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: 12px 14px;
