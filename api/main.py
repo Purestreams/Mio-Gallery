@@ -23,6 +23,8 @@ except Exception:
 # Register HEIF opener for iPhone photos
 register_heif_opener()
 
+debug_mode = False
+
 app = Flask(__name__)
 CORS(app)
 app.secret_key = os.environ.get("MIO_GALLERY_SECRET", "dev-secret-change-me")
@@ -918,7 +920,7 @@ def health_check():
     return jsonify({'status': 'ok', 'message': 'Mio Gallery API is running'})
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5088)
+    app.run(debug=debug_mode, host='0.0.0.0', port=5088)
 
 # Global error handler to log crashes and return consistent responses
 @app.errorhandler(Exception)
