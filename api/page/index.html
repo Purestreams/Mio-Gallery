@@ -18,12 +18,25 @@
       --muted: #6b7280;
       --muted-strong: #374151;
       --shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+      --bg: #f8fafc;
+      --text: #1f2937;
+      --accent: var(--rw-color-primary-600, #2563eb);
+    }
+    [data-theme="dark"] {
+      --surface: #0f172a;
+      --border: #1f2937;
+      --muted: #cbd5e1;
+      --muted-strong: #e2e8f0;
+      --shadow: 0 16px 44px rgba(0, 0, 0, 0.35);
+      --bg: #0b1220;
+      --text: #e2e8f0;
+      --accent: var(--rw-color-primary-400, #60a5fa);
     }
     body {
       margin: 0;
       font-family: "Inter", system-ui, -apple-system, sans-serif;
-      background: #f8fafc;
-      color: var(--muted-strong);
+      background: var(--bg);
+      color: var(--text);
     }
     .page {
       max-width: 1200px;
@@ -352,7 +365,10 @@
         <div class="title">Mio's Gallery</div>
         <div class="subtitle">Keep the memories.</div>
       </div>
-      <button class="btn" id="manageBtn">Manage</button>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+        <button class="btn" id="themeToggle" aria-label="Toggle theme">🌙 Dark</button>
+        <button class="btn" id="manageBtn">Manage</button>
+      </div>
     </header>
 
     <div class="card">
@@ -396,6 +412,37 @@
   <script>
     // API base (same origin as this page)
     const API_BASE = window.location.origin;
+    const THEME_KEY = "mio-theme";
+    const themeToggleBtn = document.getElementById("themeToggle");
+    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)");
+
+    function applyTheme(theme) {
+      const t = theme === "dark" ? "dark" : "light";
+      document.documentElement.dataset.theme = t;
+      localStorage.setItem(THEME_KEY, t);
+      if (themeToggleBtn) {
+        themeToggleBtn.textContent = t === "dark" ? "☀️ Light" : "🌙 Dark";
+        themeToggleBtn.setAttribute("aria-label", t === "dark" ? "Switch to light mode" : "Switch to dark mode");
+      }
+    }
+
+    function initTheme() {
+      const stored = localStorage.getItem(THEME_KEY);
+      const initial = stored || (prefersDark.matches ? "dark" : "light");
+      applyTheme(initial);
+      prefersDark.addEventListener("change", (e) => {
+        if (!localStorage.getItem(THEME_KEY)) applyTheme(e.matches ? "dark" : "light");
+      });
+    }
+
+    if (themeToggleBtn) {
+      themeToggleBtn.onclick = () => {
+        const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+        applyTheme(next);
+      };
+    }
+
+    initTheme();
 
     let photos = [];
     let viewPhotos = [];
