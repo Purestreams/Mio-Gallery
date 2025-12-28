@@ -230,6 +230,11 @@
       max-height: 86vh;
       object-fit: contain;
       background: #0b1220;
+      transition: opacity 0.2s ease;
+      opacity: 1;
+    }
+    .lightbox img.loading {
+      opacity: 0;
     }
     .lightbox .close-btn,
     .lightbox .nav-btn {
@@ -588,6 +593,12 @@
       currentIndex = index;
       const photo = viewPhotos[index];
       const { src, fallback } = pickPreferredSrc(photo);
+      // Reset previous image to avoid flash of old content
+      lightboxImg.classList.add("loading");
+      lightboxImg.onload = () => lightboxImg.classList.remove("loading");
+      lightboxImg.onerror = () => lightboxImg.classList.remove("loading");
+      lightboxImg.src = "";
+      // Assign new source after reset
       lightboxImg.src = src || "";
       applyAvifFallback(lightboxImg, fallback);
       const dt = photo.datetime || photo.date || photo.id || "";
