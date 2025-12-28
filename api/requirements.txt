@@ -12,3 +12,5 @@ pillow-heif>=0.18.0
 # pillow-avif-plugin currently fails to build on Python 3.14.
 # Install only on Python < 3.14 to avoid pip install errors.
 pillow-avif-plugin>=1.4.0; python_version < "3.14"
+
+gunicorn

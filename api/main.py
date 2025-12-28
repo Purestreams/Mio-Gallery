@@ -4,6 +4,7 @@ from PIL import Image
 from pillow_heif import register_heif_opener
 import os
 import html
+from PIL import ImageOps
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
@@ -259,6 +260,15 @@ def _pick_source_file(image_id: str) -> Path | None:
     return avif or webp or files[0]
 
 
+def _apply_exif_orientation(img: Image.Image) -> Image.Image:
+    """Apply EXIF orientation to image, returning rotated/mirrored image if needed."""
+    try:
+        return ImageOps.exif_transpose(img)
+    except Exception:
+        # exif_transpose fails gracefully on images without EXIF; just return original
+        return img
+
+
 def _ensure_thumbnail(image_id: str) -> Path | None:
     """Create WebP thumbnail capped at ~50KB (best effort)."""
     out_path = _thumb_path(image_id)
@@ -271,6 +281,7 @@ def _ensure_thumbnail(image_id: str) -> Path | None:
 
     try:
         with Image.open(src_path) as img:
+            img = _apply_exif_orientation(img)
             if img.mode in ("RGBA", "LA", "P"):
                 bg = Image.new("RGB", img.size, (255, 255, 255))
                 if img.mode == "P":
@@ -488,6 +499,7 @@ def convert_and_save_image(image_path, output_dir, base_name):
     MAX_OUTPUT_SIZE = 1024 * 1024  # 1MB
     
     with Image.open(image_path) as img:
+        img = _apply_exif_orientation(img)
         # Convert to RGB if necessary (for transparency handling)
         if img.mode in ('RGBA', 'LA', 'P'):
             # Create white background for transparent images
@@ -888,6 +900,7 @@ def download_image(image_id):
 
     try:
         with Image.open(src) as img:
+            img = _apply_exif_orientation(img)
             if img.mode in ('RGBA', 'LA', 'P'):
                 bg = Image.new('RGB', img.size, (255, 255, 255))
                 if img.mode == 'P':
