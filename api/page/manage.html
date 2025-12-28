@@ -391,31 +391,90 @@
       const DEFAULT_CONCURRENCY = Math.min(4, Math.max(2, Number(navigator.hardwareConcurrency || 4) >= 8 ? 4 : 3));
       const concurrency = DEFAULT_CONCURRENCY;
 
+      // Live speed tracking helpers
+      const totalBytes = files.reduce((sum, f) => sum + (f?.size || 0), 0);
+      let bytesUploaded = 0; // includes in-flight progress
+      const fileProgress = new Map(); // file -> last loaded bytes
+      const startTs = performance.now();
+
+      function formatBytes(bytes) {
+        const b = Number(bytes || 0);
+        if (b < 1024) return `${b} B`;
+        if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+        return `${(b / (1024 * 1024)).toFixed(2)} MB`;
+      }
+
+      function formatSpeed(bps) {
+        const s = Number(bps || 0);
+        if (s < 1024) return `${s.toFixed(0)} B/s`;
+        if (s < 1024 * 1024) return `${(s / 1024).toFixed(1)} KB/s`;
+        return `${(s / (1024 * 1024)).toFixed(2)} MB/s`;
+      }
+
+      function onProgress(file, loaded, total) {
+        const prev = fileProgress.get(file) || 0;
+        // Only add positive deltas
+        const delta = Math.max(0, Number(loaded || 0) - Number(prev || 0));
+        if (delta > 0) {
+          bytesUploaded += delta;
+          fileProgress.set(file, loaded);
+          updateProgress();
+        }
+      }
+
       async function uploadOneFile(file, attempt = 1) {
+        const startedAt = performance.now();
         const form = new FormData();
-        // Backend accepts either 'image' (single) or 'images' (list). Use 'image' for per-file requests.
         form.append("image", file);
 
-        const resp = await fetch(new URL("/api/upload", API_BASE), {
-          method: "POST",
-          body: form,
-        });
+        // Use XMLHttpRequest to get upload progress events
+        function sendOnce() {
+          return new Promise((resolve) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", new URL("/api/upload", API_BASE).toString(), true);
 
-        if (resp.ok) {
-          // Try to parse JSON, but don't fail upload if response isn't JSON.
-          await resp.json().catch(() => null);
-          return { ok: true };
+            xhr.upload.onprogress = (e) => {
+              if (e && e.lengthComputable) {
+                onProgress(file, e.loaded, e.total);
+              }
+            };
+
+            xhr.onreadystatechange = () => {
+              if (xhr.readyState === 4) {
+                const ok = xhr.status >= 200 && xhr.status < 300;
+                resolve({ ok, status: xhr.status, text: xhr.responseText });
+              }
+            };
+
+            xhr.onerror = () => {
+              resolve({ ok: false, status: 0, text: "Network error" });
+            };
+
+            xhr.send(form);
+          });
         }
 
-        // Retry once for transient errors.
-        const status = resp.status;
-        const text = await resp.text().catch(() => "");
-        const transient = status === 408 || status === 429 || (status >= 500 && status <= 599);
-        if (attempt < 2 && transient) {
-          await new Promise((r) => setTimeout(r, 500));
-          return uploadOneFile(file, attempt + 1);
+        const res = await sendOnce();
+        if (!res.ok) {
+          const transient = res.status === 408 || res.status === 429 || (res.status >= 500 && res.status <= 599) || res.status === 0;
+          if (attempt < 2 && transient) {
+            await new Promise((r) => setTimeout(r, 500));
+            return uploadOneFile(file, attempt + 1);
+          }
         }
-        return { ok: false, status, text };
+
+        // Ensure final progress counts full file on success
+        if (res.ok) {
+          const last = fileProgress.get(file) || 0;
+          if (last < (file?.size || 0)) {
+            bytesUploaded += (file?.size || 0) - last;
+            fileProgress.set(file, file?.size || 0);
+          }
+          const elapsedSec = Math.max(0.001, (performance.now() - startedAt) / 1000);
+          res.speedBps = (file?.size || 0) / elapsedSec;
+        }
+
+        return res;
       }
 
       async function runPool(items, workerFn, limit) {
@@ -435,9 +494,16 @@
       let completed = 0;
       let succeeded = 0;
       let failed = 0;
+      let avgSpeedAcc = 0; // sum of speeds for succeeded files
+      let avgSpeedCount = 0; // number of succeeded files
 
       const updateProgress = () => {
-        setStatus(`Uploading… ${completed}/${files.length} (ok ${succeeded}, failed ${failed})`);
+        const elapsed = Math.max(0.001, (performance.now() - startTs) / 1000);
+        const currentBps = bytesUploaded / elapsed;
+        const avgBps = avgSpeedCount > 0 ? avgSpeedAcc / avgSpeedCount : 0;
+        const bytesText = `${formatBytes(bytesUploaded)} / ${formatBytes(totalBytes)}`;
+        const speedText = `speed ${formatSpeed(currentBps)} (avg ${formatSpeed(avgBps)})`;
+        setStatus(`Uploading… ${completed}/${files.length} (ok ${succeeded}, failed ${failed}) • ${bytesText} • ${speedText}`);
       };
 
       try {
@@ -453,6 +519,10 @@
             else {
               failed += 1;
               console.warn("Upload failed:", file?.name, r);
+            }
+            if (r.ok && r.speedBps) {
+              avgSpeedAcc += r.speedBps;
+              avgSpeedCount += 1;
             }
             updateProgress();
             return r;
