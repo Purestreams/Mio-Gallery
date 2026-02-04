@@ -8,6 +8,10 @@ Pillow>=11.0.0
 # iPhone HEIC/HEIF decoding
 pillow-heif>=0.18.0
 
+# RAW decoding (optional). Wheels are not published for Python 3.13+ yet.
+rawpy>=0.19.0; python_version < "3.13"
+numpy>=1.26.0
+
 # Enable AVIF save/load support for Pillow (preferred over relying on system libs)
 # pillow-avif-plugin currently fails to build on Python 3.14.
 # Install only on Python < 3.14 to avoid pip install errors.

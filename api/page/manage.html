@@ -20,6 +20,7 @@
       --bg: #f8fafc;
       --text: #1f2937;
       --accent: var(--rw-color-primary-600, #2563eb);
+      --subtle: #f1f5f9;
     }
     [data-theme="dark"] {
       --surface: #0f172a;
@@ -30,6 +31,7 @@
       --bg: #0b1220;
       --text: #e2e8f0;
       --accent: var(--rw-color-primary-400, #60a5fa);
+      --subtle: #111827;
     }
     body {
       margin: 0;
@@ -97,6 +99,19 @@
       align-items: center;
       flex-wrap: wrap;
     }
+
+    .input {
+      height: 40px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted-strong);
+      font-family: inherit;
+      font-size: 14px;
+      outline: none;
+    }
+    .input:focus { border-color: var(--muted); }
     input[type="file"] {
       padding: 10px;
       border: 1px solid var(--border);
@@ -124,7 +139,7 @@
       border-color: var(--rw-color-primary-600, #2563eb);
     }
     .btn.danger {
-      background: #fff;
+      background: var(--surface);
       color: #b91c1c;
       border-color: #fecaca;
     }
@@ -145,12 +160,12 @@
       border: 1px solid var(--border);
       border-radius: 12px;
       overflow: hidden;
-      background: #fff;
+      background: var(--surface);
     }
     .thumb {
       position: relative;
       aspect-ratio: 4 / 3;
-      background: #f1f5f9;
+      background: var(--subtle);
       overflow: hidden;
     }
     .thumb img {
@@ -182,6 +197,21 @@
       display: flex;
       gap: 8px;
     }
+
+    .chk {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 13px;
+      color: var(--muted);
+      user-select: none;
+      white-space: nowrap;
+    }
+    .chk input {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+    }
     .small {
       height: 34px;
       padding: 0 10px;
@@ -203,6 +233,67 @@
       font-size: 13px;
       line-height: 1.35;
     }
+    .desc::placeholder {
+      color: var(--muted);
+    }
+
+    .albums {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .album-row {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr auto auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+        .status {
+          color: var(--muted);
+        }
+
+        /* Use subtle background for small status pills */
+        #albumList .status {
+          border-color: var(--border);
+          background: var(--subtle);
+          color: var(--muted-strong);
+        }
+    .album-row .hint {
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .section-title {
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      margin: 2px 0 6px;
+    }
+
+    @media (max-width: 980px) {
+      header { flex-direction: column; align-items: stretch; }
+      header .left { justify-content: space-between; }
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 640px) {
+      .page {
+        padding:
+          calc(18px + env(safe-area-inset-top))
+          calc(14px + env(safe-area-inset-right))
+          calc(44px + env(safe-area-inset-bottom))
+          calc(14px + env(safe-area-inset-left));
+      }
+      .grid { grid-template-columns: 1fr; gap: 12px; }
+      input[type="file"], .btn, .input { width: 100%; }
+      .toolbar .left { width: 100%; }
+      .album-row { grid-template-columns: 1fr; }
+      .album-row .hint { white-space: normal; }
+    }
   </style>
 </head>
 <body>
@@ -219,10 +310,27 @@
       </div>
     </header>
 
+    <div class="card" style="margin-bottom:14px;">
+      <div class="section-title">Private albums</div>
+      <div class="toolbar" style="margin-bottom:10px;">
+        <div class="left" style="flex:1 1 auto;">
+          <input class="input" id="newAlbumName" type="text" placeholder="Album name" />
+          <input class="input" id="newAlbumPassword" type="password" placeholder="Album password" autocomplete="new-password" />
+          <button class="btn primary" id="createAlbumBtn">Create</button>
+        </div>
+      </div>
+      <div class="albums" id="albumList"></div>
+    </div>
+
     <div class="card">
       <div class="toolbar">
         <div class="left">
           <input id="fileInput" type="file" multiple accept="image/*" />
+          <label class="chk" title="If unchecked, uploads go to selected private album">
+            <input type="checkbox" id="uploadPublic" />
+            Public
+          </label>
+          <select class="input" id="uploadAlbumSelect" aria-label="Upload album"></select>
           <button class="btn primary" id="uploadBtn">Upload</button>
           <button class="btn" id="refreshBtn">Refresh</button>
         </div>
@@ -274,6 +382,13 @@
     const statusEl = document.getElementById("status");
     const gridEl = document.getElementById("grid");
     const fileInput = document.getElementById("fileInput");
+    const albumListEl = document.getElementById("albumList");
+    const newAlbumNameEl = document.getElementById("newAlbumName");
+    const newAlbumPasswordEl = document.getElementById("newAlbumPassword");
+    const uploadPublicEl = document.getElementById("uploadPublic");
+    const uploadAlbumSelectEl = document.getElementById("uploadAlbumSelect");
+
+    let albums = [];
 
     function setStatus(text) {
       statusEl.textContent = text || "";
@@ -313,11 +428,100 @@
       return await resp.json();
     }
 
+    async function loadAlbums() {
+      try {
+        const data = await apiJson("/api/admin/albums");
+        albums = Array.isArray(data.albums) ? data.albums : [];
+        renderAlbums();
+        renderUploadAlbumSelect();
+      } catch (e) {
+        albums = [];
+        if (albumListEl) albumListEl.innerHTML = "";
+        renderUploadAlbumSelect();
+      }
+    }
+
+    function renderUploadAlbumSelect() {
+      if (!uploadAlbumSelectEl) return;
+      uploadAlbumSelectEl.innerHTML = "";
+      if (!albums.length) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "(no private albums)";
+        uploadAlbumSelectEl.appendChild(opt);
+        uploadAlbumSelectEl.disabled = true;
+      } else {
+        for (const a of albums) {
+          const opt = document.createElement("option");
+          opt.value = a.id;
+          opt.textContent = a.name || a.id;
+          uploadAlbumSelectEl.appendChild(opt);
+        }
+        uploadAlbumSelectEl.disabled = !!uploadPublicEl?.checked;
+      }
+    }
+
+    function renderAlbums() {
+      if (!albumListEl) return;
+      albumListEl.innerHTML = "";
+      if (!albums.length) {
+        albumListEl.innerHTML = "<div class=\"status\">No private albums yet.</div>";
+        return;
+      }
+      for (const a of albums) {
+        const div = document.createElement("div");
+        div.className = "album-row";
+        div.innerHTML = `
+          <input class="input" data-field="name" type="text" value="${String(a.name || a.id).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}" />
+          <input class="input" data-field="pw" type="password" placeholder="New password (optional)" autocomplete="new-password" />
+          <div class="hint">${a.id} • ${Number(a.count || 0)} photos</div>
+          <div style="display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap;">
+            <button class="btn" data-action="save">Save</button>
+            <button class="btn danger" data-action="delete">Delete</button>
+          </div>
+        `;
+
+        div.querySelector('[data-action="save"]').onclick = async () => {
+          const name = (div.querySelector('[data-field="name"]').value || "").trim();
+          const pw = (div.querySelector('[data-field="pw"]').value || "").toString();
+          try {
+            setStatus("Saving album…");
+            await apiJson(`/api/admin/albums/${encodeURIComponent(a.id)}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name, password: pw || undefined }),
+            });
+            await loadAlbums();
+            await loadList();
+            setStatus("Album saved");
+          } catch (e) {
+            setStatus("Album save failed");
+          }
+        };
+
+        div.querySelector('[data-action="delete"]').onclick = async () => {
+          if (!confirm(`Delete album "${a.name || a.id}"? Photos will become public.`)) return;
+          try {
+            setStatus("Deleting album…");
+            await apiJson(`/api/admin/albums/${encodeURIComponent(a.id)}`, { method: "DELETE" });
+            await loadAlbums();
+            await loadList();
+            setStatus("Album deleted");
+          } catch (e) {
+            setStatus("Album delete failed");
+          }
+        };
+
+        albumListEl.appendChild(div);
+      }
+    }
+
     async function loadList() {
       setStatus("Loading…");
       gridEl.innerHTML = "";
       try {
-        const data = await apiJson("/api/images");
+        await loadAlbums();
+        const data = await apiJson("/api/admin/images");
         const images = Array.isArray(data.images) ? data.images : [];
         render(images);
         setStatus(`${images.length} images`);
@@ -342,11 +546,27 @@
         const caption = photo.date || photo.id || "";
         const description = (photo.description || "").toString();
 
+        const albumId = photo.album_id || "";
+        const isPublic = !albumId;
+        const albumOptions = [
+          `<option value="">Public</option>`,
+          ...albums.map((a) => `<option value="${String(a.id).replaceAll('"','&quot;')}">${String(a.name || a.id).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</option>`),
+        ].join("");
+
         div.innerHTML = `
           <div class="thumb"><img alt="${caption}" loading="lazy" /></div>
           <div class="meta">
             <div class="row">
               <div class="label">${caption}${photo.pinned ? " (pinned)" : ""}</div>
+            </div>
+            <div class="row">
+              <label class="chk">
+                <input type="checkbox" data-action="public" ${isPublic ? "checked" : ""} />
+                Public
+              </label>
+              <select class="input" data-action="album" aria-label="Album" style="flex:1 1 auto;">
+                ${albumOptions}
+              </select>
             </div>
             <div class="row">
               <textarea class="desc" placeholder="Description…">${description.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</textarea>
@@ -364,6 +584,60 @@
           const img = div.querySelector("img");
           img.src = thumbSrc || "";
         applyAvifFallback(img, fallback);
+
+          const albumSel = div.querySelector('[data-action="album"]');
+          const publicChk = div.querySelector('[data-action="public"]');
+          if (albumSel) {
+            albumSel.value = albumId;
+            albumSel.disabled = isPublic || albums.length === 0;
+            albumSel.onchange = async () => {
+              try {
+                setStatus("Updating album…");
+                if (publicChk) publicChk.checked = false;
+                await apiJson(`/api/admin/images/${encodeURIComponent(photo.id)}/album`, {
+                  method: "PUT",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ album_id: albumSel.value || null }),
+                });
+                await loadList();
+              } catch (e) {
+                setStatus("Album update failed");
+              }
+            };
+          }
+
+          if (publicChk) {
+            publicChk.onchange = async () => {
+              const wantPublic = !!publicChk.checked;
+              try {
+                setStatus("Updating visibility…");
+                if (wantPublic) {
+                  if (albumSel) albumSel.value = "";
+                  await apiJson(`/api/admin/images/${encodeURIComponent(photo.id)}/album`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ album_id: null }),
+                  });
+                } else {
+                  if (!albums.length) {
+                    publicChk.checked = true;
+                    setStatus("Create a private album first");
+                    return;
+                  }
+                  const nextAlbum = (albumSel && albumSel.value) ? albumSel.value : (albums[0]?.id || "");
+                  if (albumSel) albumSel.value = nextAlbum;
+                  await apiJson(`/api/admin/images/${encodeURIComponent(photo.id)}/album`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ album_id: nextAlbum }),
+                  });
+                }
+                await loadList();
+              } catch (e) {
+                setStatus("Visibility update failed");
+              }
+            };
+          }
 
         div.querySelector('[data-action="pin"]').onclick = async () => {
           try {
@@ -423,6 +697,13 @@
         return;
       }
 
+      const publicFlag = !!uploadPublicEl?.checked;
+      const chosenAlbum = (uploadAlbumSelectEl?.value || "").trim();
+      if (!publicFlag && (!chosenAlbum || uploadAlbumSelectEl?.disabled)) {
+        setStatus("Uploads are private by default: select an album or check Public");
+        return;
+      }
+
       const uploadBtn = document.getElementById("uploadBtn");
       const refreshBtn = document.getElementById("refreshBtn");
       const setUploadingUi = (uploading) => {
@@ -471,6 +752,8 @@
         const startedAt = performance.now();
         const form = new FormData();
         form.append("image", file);
+        form.append("public", publicFlag ? "1" : "0");
+        if (!publicFlag && chosenAlbum) form.append("album_id", chosenAlbum);
 
         // Use XMLHttpRequest to get upload progress events
         function sendOnce() {
@@ -596,6 +879,43 @@
     };
 
     document.getElementById("footerYear").textContent = new Date().getFullYear();
+
+    if (uploadPublicEl) {
+      uploadPublicEl.checked = false; // default: not public
+      uploadPublicEl.onchange = () => {
+        if (uploadAlbumSelectEl) {
+          uploadAlbumSelectEl.disabled = !!uploadPublicEl.checked || !albums.length;
+        }
+      };
+    }
+
+    document.getElementById("createAlbumBtn").onclick = async () => {
+      const name = (newAlbumNameEl.value || "").trim();
+      const pw = (newAlbumPasswordEl.value || "").toString();
+      if (!name) {
+        setStatus("Album name required");
+        return;
+      }
+      if (!pw.trim()) {
+        setStatus("Album password required");
+        return;
+      }
+      try {
+        setStatus("Creating album…");
+        await apiJson("/api/admin/albums", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, password: pw }),
+        });
+        newAlbumNameEl.value = "";
+        newAlbumPasswordEl.value = "";
+        await loadAlbums();
+        await loadList();
+        setStatus("Album created");
+      } catch (e) {
+        setStatus("Album create failed");
+      }
+    };
 
     loadList();
   </script>

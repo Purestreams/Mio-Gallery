@@ -99,6 +99,13 @@
       align-items: center;
       flex-wrap: wrap;
     }
+    .filters .right {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
     .input {
       height: 40px;
       padding: 0 12px;
@@ -330,8 +337,12 @@
 
       .filters { gap: 12px; }
       .filters .left { width: 100%; }
+      .filters .right { width: 100%; justify-content: stretch; }
       .input { flex: 1 1 140px; }
       .input[type="text"] { min-width: 0 !important; flex: 1 1 100%; }
+      #albumSelect { width: 100%; }
+      #albumPassword { width: 100%; }
+      #unlockAlbum { width: 100%; }
       #clearFilters { width: 100%; }
 
       .gallery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
@@ -383,6 +394,15 @@
           <input class="input" id="endDate" type="date" />
           <input class="input" id="descSearch" type="text" placeholder="Search description" style="min-width: 240px" />
           <button class="btn" id="clearFilters">Clear</button>
+        </div>
+
+        <div class="right">
+          <select class="input" id="albumSelect" aria-label="Album">
+            <option value="public">Public</option>
+            <option value="all">All accessible</option>
+          </select>
+          <input class="input" id="albumPassword" type="password" placeholder="Album password" autocomplete="off" />
+          <button class="btn" id="unlockAlbum">Unlock</button>
         </div>
       </div>
       <div class="gallery-grid" id="gallery"></div>
@@ -468,6 +488,54 @@
     const startDateEl = document.getElementById("startDate");
     const endDateEl = document.getElementById("endDate");
     const descSearchEl = document.getElementById("descSearch");
+    const albumSelectEl = document.getElementById("albumSelect");
+    const albumPasswordEl = document.getElementById("albumPassword");
+    const unlockAlbumBtn = document.getElementById("unlockAlbum");
+
+    async function apiJson(path, options) {
+      const resp = await fetch(new URL(path, API_BASE), {
+        credentials: "same-origin",
+        ...options,
+      });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        throw new Error(`HTTP ${resp.status} ${text}`);
+      }
+      if (resp.status === 204) return null;
+      return await resp.json();
+    }
+
+    function setAlbumOptions(unlocked) {
+      const keep = albumSelectEl.value;
+      const base = [
+        { id: "public", name: "Public" },
+        { id: "all", name: "All accessible" },
+      ];
+      const extras = Array.isArray(unlocked) ? unlocked : [];
+      const seen = new Set();
+      const all = [...base, ...extras]
+        .filter((x) => x && x.id)
+        .filter((x) => (seen.has(x.id) ? false : (seen.add(x.id), true)));
+
+      albumSelectEl.innerHTML = "";
+      for (const a of all) {
+        const opt = document.createElement("option");
+        opt.value = a.id;
+        opt.textContent = a.name || a.id;
+        albumSelectEl.appendChild(opt);
+      }
+      if (all.some((a) => a.id === keep)) albumSelectEl.value = keep;
+      else albumSelectEl.value = "public";
+    }
+
+    async function refreshUnlockedAlbums() {
+      try {
+        const data = await apiJson("/api/albums/unlocked");
+        setAlbumOptions(data.unlocked || []);
+      } catch (e) {
+        // ignore
+      }
+    }
 
     function absUrl(path) {
       if (!path) return null;
@@ -509,6 +577,8 @@
       const end = (endDateEl.value || "").trim();
       if (start) url.searchParams.set("start_date", start);
       if (end) url.searchParams.set("end_date", end);
+      const album = (albumSelectEl?.value || "public").trim();
+      if (album) url.searchParams.set("album", album);
       return url.toString();
     }
 
@@ -529,7 +599,7 @@
     async function loadPhotos() {
       galleryEl.innerHTML = "Loading…";
       try {
-        const resp = await fetch(buildListUrl());
+        const resp = await fetch(buildListUrl(), { credentials: "same-origin" });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         photos = Array.isArray(data.images) ? data.images : [];
@@ -644,6 +714,43 @@
     startDateEl.addEventListener("change", loadPhotos);
     endDateEl.addEventListener("change", loadPhotos);
     descSearchEl.addEventListener("input", applyFilters);
+    albumSelectEl.addEventListener("change", loadPhotos);
+
+    async function unlockAlbums() {
+      const pw = (albumPasswordEl.value || "").toString();
+      if (!pw.trim()) return;
+      unlockAlbumBtn.disabled = true;
+      unlockAlbumBtn.textContent = "Unlocking…";
+      try {
+        const data = await apiJson("/api/albums/unlock", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: pw }),
+        });
+        const unlocked = data.unlocked || [];
+        await refreshUnlockedAlbums();
+        if (unlocked.length) {
+          // jump to the first unlocked album
+          albumSelectEl.value = unlocked[0].id;
+        }
+        albumPasswordEl.value = "";
+        await loadPhotos();
+      } catch (e) {
+        // simple UX: clear input on failure
+        albumPasswordEl.select();
+      } finally {
+        unlockAlbumBtn.disabled = false;
+        unlockAlbumBtn.textContent = "Unlock";
+      }
+    }
+
+    unlockAlbumBtn.onclick = unlockAlbums;
+    albumPasswordEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        unlockAlbums();
+      }
+    });
     document.getElementById("clearFilters").onclick = () => {
       startDateEl.value = "";
       endDateEl.value = "";
@@ -669,7 +776,7 @@
 
     document.getElementById("footerYear").textContent = new Date().getFullYear();
 
-    loadPhotos();
+    refreshUnlockedAlbums().finally(loadPhotos);
   </script>
 </body>
 </html>

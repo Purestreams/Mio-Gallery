@@ -15,11 +15,17 @@ from werkzeug.utils import secure_filename
 from PIL import ExifTags
 from io import BytesIO
 from werkzeug.exceptions import HTTPException
+from werkzeug.security import check_password_hash, generate_password_hash
 
 try:
     import pillow_avif  # noqa: F401
 except Exception:
     pillow_avif = None
+
+try:
+    import rawpy  # Optional RAW decoder
+except Exception:
+    rawpy = None
 
 # Register HEIF opener for iPhone photos
 register_heif_opener()
@@ -62,19 +68,96 @@ def _init_logging():
 _init_logging()
 
 ADMIN_PASSWORD = os.environ.get("MIO_GALLERY_PASSWORD", "Admin123")
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'webp', 'heic', 'heif'}
+RAW_EXTENSIONS = {"cr2", "cr3", "nef", "arw", "orf", "raf", "rw2", "srw", "dng", "pef"}
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'webp', 'heic', 'heif', *RAW_EXTENSIONS}
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
-THUMB_MAX_BYTES = 50 * 1024  # 50KB
+THUMB_MAX_BYTES = 30 * 1024  # 30KB
 
 
 def _is_admin() -> bool:
-        return bool(session.get("is_admin"))
+    return bool(session.get("is_admin"))
 
 
 def _require_admin():
-        if not _is_admin():
-                return jsonify({'error': 'Unauthorized'}), 401
+    if not _is_admin():
+        return jsonify({'error': 'Unauthorized'}), 401
+    return None
+
+
+def _meta_get_albums(meta: dict) -> dict:
+    albums = meta.get("albums") if isinstance(meta, dict) else None
+    return albums if isinstance(albums, dict) else {}
+
+
+def _meta_get_image_album(meta: dict) -> dict:
+    m = meta.get("image_album") if isinstance(meta, dict) else None
+    return m if isinstance(m, dict) else {}
+
+
+def _normalize_album_id(val) -> str | None:
+    if val is None:
         return None
+    s = str(val).strip()
+    if not s:
+        return None
+    if s.lower() in {"public", "none", "null"}:
+        return None
+    return s
+
+
+def _get_image_album_id(image_id: str) -> str | None:
+    meta = _load_meta()
+    mapping = _meta_get_image_album(meta)
+    album_id = mapping.get(image_id)
+    if not album_id:
+        return None
+    album_id = str(album_id)
+    if not album_id:
+        return None
+    # Treat unknown album ids as public (e.g. album deleted).
+    albums = _meta_get_albums(meta)
+    return album_id if album_id in albums else None
+
+
+def _get_album_name(album_id: str | None) -> str | None:
+    if not album_id:
+        return None
+    meta = _load_meta()
+    albums = _meta_get_albums(meta)
+    a = albums.get(album_id) if isinstance(albums, dict) else None
+    if not isinstance(a, dict):
+        return None
+    name = a.get("name")
+    return str(name) if name else None
+
+
+def _unlocked_album_ids() -> set[str]:
+    raw = session.get("unlocked_albums")
+    if not raw:
+        return set()
+    if isinstance(raw, (list, tuple, set)):
+        return {str(x) for x in raw if x}
+    return set()
+
+
+def _can_access_album(album_id: str | None) -> bool:
+    if _is_admin():
+        return True
+    if not album_id:
+        return True
+    return album_id in _unlocked_album_ids()
+
+
+def _can_access_image(image_id: str) -> bool:
+    album_id = _get_image_album_id(image_id)
+    return _can_access_album(album_id)
+
+
+def _require_image_access_or_404(image_id: str):
+    if _can_access_image(image_id):
+        return None
+    # 404 by default to avoid leaking existence.
+    return jsonify({'error': 'Image not found'}), 404
 
 
 @app.route('/', methods=['GET'])
@@ -91,6 +174,9 @@ def serve_manage_page():
 
 @app.route('/photo/<image_id>', methods=['GET'])
 def serve_photo_page(image_id):
+    if not _can_access_image(image_id):
+        return "Not Found", 404
+
     payload = _build_image_payload(image_id)
     if not payload:
         return jsonify({'error': 'Image not found'}), 404
@@ -269,6 +355,23 @@ def _apply_exif_orientation(img: Image.Image) -> Image.Image:
         return img
 
 
+def _open_image_any(path: Path) -> Image.Image:
+    """Open standard images or RAW files (if rawpy is installed)."""
+    try:
+        img = Image.open(path)
+        img.load()
+        return img
+    except Exception:
+        if rawpy is None:
+            raise
+        raw = rawpy.imread(str(path))
+        try:
+            rgb = raw.postprocess(output_bps=8, use_camera_wb=True, no_auto_bright=True)
+        finally:
+            raw.close()
+        return Image.fromarray(rgb)
+
+
 def _ensure_thumbnail(image_id: str) -> Path | None:
     """Create WebP thumbnail capped at ~50KB (best effort)."""
     out_path = _thumb_path(image_id)
@@ -327,6 +430,10 @@ def _ensure_thumbnail(image_id: str) -> Path | None:
 @app.route('/api/thumb/<image_id>.webp', methods=['GET'])
 def serve_thumbnail(image_id):
     """Serve (and lazily generate) a small WebP thumbnail for grid previews."""
+    guard = _require_image_access_or_404(image_id)
+    if guard:
+        return guard
+
     files = _find_files_by_id(image_id)
     if not files:
         return jsonify({'error': 'Image not found'}), 404
@@ -482,6 +589,9 @@ def _build_image_payload(image_id: str) -> dict | None:
     webp = next((p for p in files if p.suffix.lower() == ".webp"), None)
     avif = next((p for p in files if p.suffix.lower() == ".avif"), None)
 
+    album_id = _get_image_album_id(image_id)
+    album_name = _get_album_name(album_id)
+
     return {
         "id": image_id,
         "date": date_str,
@@ -491,18 +601,227 @@ def _build_image_payload(image_id: str) -> dict | None:
         "avif": _rel(avif),
         "pinned": bool(pinned_map.get(image_id, False)),
         "description": _load_description(image_id),
+        "album_id": album_id,
+        "album_name": album_name,
     }
 
+
+@app.route('/api/albums/unlocked', methods=['GET'])
+def get_unlocked_albums():
+    """Return album ids/names unlocked in this session."""
+    meta = _load_meta()
+    albums = _meta_get_albums(meta)
+    unlocked = []
+    for aid in sorted(_unlocked_album_ids()):
+        a = albums.get(aid)
+        if isinstance(a, dict):
+            unlocked.append({"id": aid, "name": a.get("name") or aid})
+    return jsonify({"unlocked": unlocked}), 200
+
+
+@app.route('/api/albums/unlock', methods=['POST'])
+def unlock_album():
+    """Unlock one or more private albums by password for this session."""
+    body = request.get_json(silent=True) or {}
+    password = (body.get("password") or "").strip()
+    if not password:
+        return jsonify({"error": "missing_password"}), 400
+
+    meta = _load_meta()
+    albums = _meta_get_albums(meta)
+
+    matched = []
+    for aid, a in albums.items():
+        if not isinstance(a, dict):
+            continue
+        pw_hash = a.get("password_hash")
+        if not pw_hash:
+            continue
+        try:
+            if check_password_hash(str(pw_hash), password):
+                matched.append({"id": aid, "name": a.get("name") or aid})
+        except Exception:
+            continue
+
+    if not matched:
+        return jsonify({"error": "invalid_password"}), 401
+
+    unlocked = _unlocked_album_ids()
+    for a in matched:
+        unlocked.add(a["id"])
+    session["unlocked_albums"] = sorted(unlocked)
+
+    return jsonify({"unlocked": matched}), 200
+
+
+@app.route('/api/albums/lock', methods=['POST'])
+def lock_albums():
+    """Clear unlocked album access for this session."""
+    session.pop("unlocked_albums", None)
+    return jsonify({"ok": True}), 200
+
+
+def _album_id_from_name(name: str, existing: set[str]) -> str:
+    base = secure_filename((name or "").strip()).lower() or "album"
+    candidate = base
+    i = 2
+    while candidate in existing:
+        candidate = f"{base}-{i}"
+        i += 1
+    return candidate
+
+
+@app.route('/api/admin/albums', methods=['GET', 'POST'])
+def admin_albums():
+    auth = _require_admin()
+    if auth:
+        return auth
+
+    meta = _load_meta()
+    if not isinstance(meta, dict):
+        meta = {}
+    albums = _meta_get_albums(meta)
+
+    if request.method == 'GET':
+        # Include counts (best-effort)
+        image_album = _meta_get_image_album(meta)
+        counts = {}
+        for _, aid in image_album.items():
+            if not aid:
+                continue
+            aid = str(aid)
+            counts[aid] = counts.get(aid, 0) + 1
+
+        out = []
+        for aid, a in sorted(albums.items(), key=lambda kv: (str((kv[1] or {}).get('name') or kv[0]).lower())):
+            if not isinstance(a, dict):
+                continue
+            out.append({
+                "id": aid,
+                "name": a.get("name") or aid,
+                "count": counts.get(aid, 0),
+                "created_at": a.get("created_at"),
+            })
+        return jsonify({"albums": out}), 200
+
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    password = (body.get("password") or "").strip()
+    if not name:
+        return jsonify({"error": "missing_name"}), 400
+    if not password:
+        return jsonify({"error": "missing_password"}), 400
+
+    existing_ids = set(albums.keys())
+    aid = _album_id_from_name(name, existing_ids)
+    albums[aid] = {
+        "name": name,
+        "password_hash": generate_password_hash(password),
+        "created_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    meta["albums"] = albums
+    _save_meta(meta)
+
+    return jsonify({"id": aid, "name": name}), 201
+
+
+@app.route('/api/admin/albums/<album_id>', methods=['PUT', 'DELETE'])
+def admin_album_update(album_id):
+    auth = _require_admin()
+    if auth:
+        return auth
+
+    album_id = str(Path(album_id).name)
+    meta = _load_meta()
+    if not isinstance(meta, dict):
+        meta = {}
+    albums = _meta_get_albums(meta)
+
+    if album_id not in albums:
+        return jsonify({"error": "not_found"}), 404
+
+    if request.method == 'DELETE':
+        albums.pop(album_id, None)
+        meta["albums"] = albums
+        # Unassign images from this album
+        image_album = _meta_get_image_album(meta)
+        if isinstance(image_album, dict):
+            for img_id, aid in list(image_album.items()):
+                if str(aid) == album_id:
+                    image_album.pop(img_id, None)
+            meta["image_album"] = image_album
+        _save_meta(meta)
+        return jsonify({"ok": True}), 200
+
+    body = request.get_json(silent=True) or {}
+    name = body.get("name")
+    password = body.get("password")
+
+    a = albums.get(album_id)
+    if not isinstance(a, dict):
+        a = {}
+
+    if name is not None:
+        name = str(name).strip()
+        if not name:
+            return jsonify({"error": "missing_name"}), 400
+        a["name"] = name
+    if password is not None:
+        password = str(password).strip()
+        if password:
+            a["password_hash"] = generate_password_hash(password)
+
+    albums[album_id] = a
+    meta["albums"] = albums
+    _save_meta(meta)
+    return jsonify({"id": album_id, "name": a.get("name") or album_id}), 200
+
+
+@app.route('/api/admin/images/<image_id>/album', methods=['PUT'])
+def admin_set_image_album(image_id):
+    auth = _require_admin()
+    if auth:
+        return auth
+
+    files = _find_files_by_id(image_id)
+    if not files:
+        return jsonify({'error': 'Image not found'}), 404
+
+    body = request.get_json(silent=True) or {}
+    album_id = body.get("album_id")
+    if album_id is not None:
+        album_id = str(album_id).strip()
+    if album_id in (None, "", "public"):
+        album_id = None
+
+    meta = _load_meta()
+    if not isinstance(meta, dict):
+        meta = {}
+    albums = _meta_get_albums(meta)
+    image_album = _meta_get_image_album(meta)
+
+    if album_id is not None and album_id not in albums:
+        return jsonify({"error": "album_not_found"}), 404
+
+    if album_id is None:
+        image_album.pop(image_id, None)
+    else:
+        image_album[image_id] = album_id
+
+    meta["image_album"] = image_album
+    _save_meta(meta)
+
+    return jsonify({"id": image_id, "album_id": album_id, "album_name": _get_album_name(album_id)}), 200
+
 def convert_and_save_image(image_path, output_dir, base_name):
-    """Convert image to WebP and AVIF formats, limiting output to ~1MB"""
+    """Convert image (including RAW, if supported) to WebP and AVIF, capped ~1MB each."""
     results = {}
     MAX_OUTPUT_SIZE = 1024 * 1024  # 1MB
-    
-    with Image.open(image_path) as img:
+
+    img = _open_image_any(image_path)
+    try:
         img = _apply_exif_orientation(img)
-        # Convert to RGB if necessary (for transparency handling)
         if img.mode in ('RGBA', 'LA', 'P'):
-            # Create white background for transparent images
             background = Image.new('RGB', img.size, (255, 255, 255))
             if img.mode == 'P':
                 img = img.convert('RGBA')
@@ -510,29 +829,25 @@ def convert_and_save_image(image_path, output_dir, base_name):
             img = background
         elif img.mode != 'RGB':
             img = img.convert('RGB')
-        
-        # Save as WebP with size limit
+
         webp_path = output_dir / f"{base_name}.webp"
         quality = 70
         while quality >= 50:
             buf = BytesIO()
             img.save(buf, 'WEBP', quality=quality, method=6)
-            size = buf.tell()
-            if size <= MAX_OUTPUT_SIZE or quality <= 50:
+            if buf.tell() <= MAX_OUTPUT_SIZE or quality <= 50:
                 webp_path.write_bytes(buf.getvalue())
                 break
             quality -= 5
         results['webp'] = str(webp_path.relative_to(PHOTO_DIR))
-        
-        # Save as AVIF with size limit
+
         try:
             avif_path = output_dir / f"{base_name}.avif"
             quality = 80
             while quality >= 50:
                 buf = BytesIO()
                 img.save(buf, 'AVIF', quality=quality)
-                size = buf.tell()
-                if size <= MAX_OUTPUT_SIZE or quality <= 50:
+                if buf.tell() <= MAX_OUTPUT_SIZE or quality <= 50:
                     avif_path.write_bytes(buf.getvalue())
                     break
                 quality -= 5
@@ -540,7 +855,12 @@ def convert_and_save_image(image_path, output_dir, base_name):
         except Exception as e:
             print(f"AVIF conversion failed: {e}. AVIF support may not be available.")
             results['avif'] = None
-    
+    finally:
+        try:
+            img.close()
+        except Exception:
+            pass
+
     return results
 
 @app.route('/api/upload', methods=['POST'])
@@ -553,6 +873,19 @@ def upload_image():
     auth = _require_admin()
     if auth:
         return auth
+
+    # Optional: assign new uploads to a private album (default recommended by UI).
+    meta_for_upload = _load_meta()
+    albums_for_upload = _meta_get_albums(meta_for_upload)
+    public_flag = (request.form.get("public") or "").strip().lower() in {"1", "true", "yes", "on"}
+    upload_album_id = _normalize_album_id(request.form.get("album_id"))
+
+    if upload_album_id is not None and upload_album_id not in albums_for_upload:
+        return jsonify({"error": "album_not_found"}), 404
+
+    if not public_flag and upload_album_id is None and len(albums_for_upload) > 0:
+        # UI defaults to private; enforce explicit choice when albums exist.
+        return jsonify({"error": "missing_album", "message": "Select an album or mark as public"}), 400
 
     if 'image' not in request.files and 'images' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
@@ -570,6 +903,11 @@ def upload_image():
         
         if not allowed_file(file.filename):
             errors.append({'filename': file.filename, 'error': 'File type not allowed'})
+            continue
+
+        ext = file.filename.rsplit('.', 1)[1].lower()
+        if ext in RAW_EXTENSIONS and rawpy is None:
+            errors.append({'filename': file.filename, 'error': 'RAW support requires rawpy to be installed on the server'})
             continue
         
         try:
@@ -609,6 +947,13 @@ def upload_image():
                 dt_map = {}
             dt_map[base_name] = photo_date.strftime("%Y-%m-%d %H:%M:%S")
             meta["datetime"] = dt_map
+
+            # Persist album assignment (optional)
+            if upload_album_id is not None:
+                image_album = _meta_get_image_album(meta)
+                image_album[base_name] = upload_album_id
+                meta["image_album"] = image_album
+
             _save_meta(meta)
             
             # Remove temp file
@@ -645,6 +990,7 @@ def get_images():
     """
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
+    album_filter = (request.args.get('album') or '').strip()
     
     # Parse date filters
     start_dt = None
@@ -664,6 +1010,16 @@ def get_images():
     datetime_map = meta.get("datetime", {}) if isinstance(meta, dict) else {}
     if not isinstance(datetime_map, dict):
         datetime_map = {}
+
+    image_album = _meta_get_image_album(meta)
+    albums = _meta_get_albums(meta)
+
+    # Album access rules (IMPORTANT): behaves the same for admins and normal users.
+    # Admin login should not automatically reveal private albums on the public gallery page.
+    if album_filter and album_filter not in ("all", "public"):
+        # requesting a specific private album
+        if album_filter not in _unlocked_album_ids():
+            return jsonify({"error": "forbidden"}), 403
     
     # Walk through photo directory
     for year_dir in sorted(PHOTO_DIR.iterdir()):
@@ -708,6 +1064,28 @@ def get_images():
             
             # Filter by exact date range and add to results
             for base_name, img_data in image_groups.items():
+                img_album_id = None
+                try:
+                    img_album_id = image_album.get(base_name) if isinstance(image_album, dict) else None
+                    img_album_id = str(img_album_id).strip() if img_album_id else None
+                except Exception:
+                    img_album_id = None
+
+                # Normalize: unknown album ids => public
+                if img_album_id and img_album_id not in albums:
+                    img_album_id = None
+
+                # Enforce access (no admin bypass here)
+                if album_filter == "public":
+                    if img_album_id is not None:
+                        continue
+                elif album_filter and album_filter not in ("all", "public"):
+                    if img_album_id != album_filter:
+                        continue
+                else:
+                    if img_album_id is not None and img_album_id not in _unlocked_album_ids():
+                        continue
+
                 dt_str = datetime_map.get(base_name)
                 dt_obj = None
                 if dt_str:
@@ -741,6 +1119,8 @@ def get_images():
                     'avif': img_data['avif'],
                     'pinned': bool(pinned_map.get(base_name, False)),
                     'description': _load_description(base_name),
+                    'album_id': img_album_id,
+                    'album_name': (albums.get(img_album_id) or {}).get('name') if img_album_id and isinstance(albums.get(img_album_id), dict) else None,
                 })
 
     # Pinned first, then newest first (best effort)
@@ -753,6 +1133,136 @@ def get_images():
 
     images.sort(key=_sort_key)
     
+    return jsonify({
+        'total': len(images),
+        'images': images,
+        'filters': {
+            'start_date': start_date,
+            'end_date': end_date
+        }
+    })
+
+
+@app.route('/api/admin/images', methods=['GET'])
+def admin_get_images():
+    """Admin-only: list all images, including private albums."""
+    auth = _require_admin()
+    if auth:
+        return auth
+
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+
+    # Parse date filters
+    start_dt = None
+    end_dt = None
+
+    try:
+        if start_date:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        if end_date:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+    except ValueError:
+        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+
+    images = []
+    meta = _load_meta()
+    pinned_map = meta.get("pinned", {}) if isinstance(meta, dict) else {}
+    datetime_map = meta.get("datetime", {}) if isinstance(meta, dict) else {}
+    if not isinstance(datetime_map, dict):
+        datetime_map = {}
+
+    image_album = _meta_get_image_album(meta)
+    albums = _meta_get_albums(meta)
+
+    for year_dir in sorted(PHOTO_DIR.iterdir()):
+        if not year_dir.is_dir() or year_dir.name.startswith('.'):
+            continue
+        for month_dir in sorted(year_dir.iterdir()):
+            if not month_dir.is_dir() or month_dir.name.startswith('.'):
+                continue
+
+            try:
+                month_date = datetime.strptime(f"{year_dir.name}-{month_dir.name}", "%Y-%m")
+                if start_dt and month_date.replace(day=28) < start_dt.replace(day=1):
+                    continue
+                if end_dt and month_date.replace(day=1) > end_dt.replace(day=28):
+                    continue
+            except ValueError:
+                continue
+
+            image_groups = {}
+            for img_file in sorted(month_dir.iterdir()):
+                if img_file.is_file() and not img_file.name.startswith('.'):
+                    base_name = img_file.stem
+                    ext = img_file.suffix[1:]
+                    if base_name not in image_groups:
+                        image_groups[base_name] = {'webp': None, 'avif': None, 'date': None}
+                    relative_path = img_file.relative_to(PHOTO_DIR)
+                    image_groups[base_name][ext] = f"/api/images/{relative_path}"
+                    if not image_groups[base_name]['date']:
+                        try:
+                            date_part = base_name.split('_')[0]
+                            img_date = datetime.strptime(date_part, "%Y%m%d")
+                            image_groups[base_name]['date'] = img_date.strftime("%Y-%m-%d")
+                        except Exception:
+                            image_groups[base_name]['date'] = f"{year_dir.name}-{month_dir.name}-01"
+
+            for base_name, img_data in image_groups.items():
+                img_album_id = None
+                try:
+                    img_album_id = image_album.get(base_name) if isinstance(image_album, dict) else None
+                    img_album_id = str(img_album_id).strip() if img_album_id else None
+                except Exception:
+                    img_album_id = None
+                if img_album_id and img_album_id not in albums:
+                    img_album_id = None
+
+                dt_str = datetime_map.get(base_name)
+                dt_obj = None
+                if dt_str:
+                    try:
+                        dt_obj = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        dt_obj = None
+                if not dt_obj:
+                    dt_obj = _extract_datetime_from_id(base_name)
+
+                date_str = img_data.get('date')
+                if dt_obj:
+                    date_str = dt_obj.strftime("%Y-%m-%d")
+
+                try:
+                    img_date = datetime.strptime(date_str, "%Y-%m-%d")
+                    if start_dt and img_date < start_dt:
+                        continue
+                    if end_dt and img_date > end_dt:
+                        continue
+                except Exception:
+                    pass
+
+                images.append({
+                    'id': base_name,
+                    'date': date_str,
+                    'datetime': dt_obj.strftime("%Y-%m-%d %H:%M:%S") if dt_obj else dt_str,
+                    'thumb': f"/api/thumb/{base_name}.webp",
+                    'webp': img_data['webp'],
+                    'avif': img_data['avif'],
+                    'pinned': bool(pinned_map.get(base_name, False)),
+                    'description': _load_description(base_name),
+                    'album_id': img_album_id,
+                    'album_name': (albums.get(img_album_id) or {}).get('name') if img_album_id and isinstance(albums.get(img_album_id), dict) else None,
+                })
+
+    def _sort_key(x):
+        try:
+            d = datetime.strptime(x.get('date') or "1970-01-01", "%Y-%m-%d")
+        except Exception:
+            d = datetime(1970, 1, 1)
+        return (0 if x.get('pinned') else 1, -int(d.timestamp()), x.get('id') or "")
+
+    images.sort(key=_sort_key)
+
     return jsonify({
         'total': len(images),
         'images': images,
@@ -801,6 +1311,10 @@ def pin_image(image_id):
 @app.route('/api/images/<image_id>/description', methods=['GET', 'PUT'])
 def image_description(image_id):
     """Get/set image description stored in photo/description/<id>.txt."""
+    guard = _require_image_access_or_404(image_id)
+    if guard and request.method == 'GET':
+        return guard
+
     files = _find_files_by_id(image_id)
     if not files:
         return jsonify({'error': 'Image not found'}), 404
@@ -822,6 +1336,10 @@ def image_description(image_id):
 
 @app.route('/api/images/<image_id>', methods=['GET'])
 def get_image(image_id):
+    guard = _require_image_access_or_404(image_id)
+    if guard:
+        return guard
+
     payload = _build_image_payload(image_id)
     if not payload:
         return jsonify({'error': 'Image not found'}), 404
@@ -853,7 +1371,13 @@ def delete_image(image_id):
         if isinstance(pinned_map, dict):
             pinned_map.pop(image_id, None)
             meta["pinned"] = pinned_map
-            _save_meta(meta)
+
+        image_album = meta.get("image_album")
+        if isinstance(image_album, dict):
+            image_album.pop(image_id, None)
+            meta["image_album"] = image_album
+
+        _save_meta(meta)
 
     try:
         _description_path(image_id).unlink(missing_ok=True)
@@ -876,6 +1400,10 @@ def delete_image(image_id):
 @app.route('/api/images/<image_id>/download', methods=['GET'])
 def download_image(image_id):
     """Download an image as AVIF or JPG (JPG is converted from AVIF/WebP)."""
+    guard = _require_image_access_or_404(image_id)
+    if guard:
+        return guard
+
     files = _find_files_by_id(image_id)
     if not files:
         return jsonify({'error': 'Image not found'}), 404
@@ -924,6 +1452,11 @@ def serve_image(filename):
     from flask import send_from_directory
     file_path = PHOTO_DIR / filename
     if file_path.exists() and file_path.is_file():
+        # enforce album access based on image id (filename stem)
+        img_id = file_path.stem
+        guard = _require_image_access_or_404(img_id)
+        if guard:
+            return guard
         return send_from_directory(PHOTO_DIR, filename)
     return jsonify({'error': 'Image not found'}), 404
 
