@@ -274,11 +274,49 @@
       letter-spacing: -0.01em;
       margin: 2px 0 6px;
     }
+    .status-panel {
+      margin-bottom: 14px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px;
+      background: var(--subtle);
+      display: grid;
+      gap: 8px;
+    }
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .status-pill {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px;
+      background: var(--surface);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .status-pill b {
+      display: block;
+      font-size: 16px;
+      line-height: 1.1;
+      color: var(--muted-strong);
+      margin-top: 4px;
+    }
+    .status-errors {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      max-height: 88px;
+      overflow: auto;
+    }
 
     @media (max-width: 980px) {
       header { flex-direction: column; align-items: stretch; }
       header .left { justify-content: space-between; }
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .status-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     }
     @media (max-width: 640px) {
       .page {
@@ -293,6 +331,7 @@
       .toolbar .left { width: 100%; }
       .album-row { grid-template-columns: 1fr; }
       .album-row .hint { white-space: normal; }
+      .status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
   </style>
 </head>
@@ -334,6 +373,12 @@
           <button class="btn primary" id="uploadBtn">Upload</button>
           <button class="btn" id="refreshBtn">Refresh</button>
         </div>
+      </div>
+
+      <div class="status-panel" id="uploadStatusPanel">
+        <div class="section-title" style="margin:0; font-size:14px;">Upload Queue Status</div>
+        <div class="status-grid" id="uploadStatusStats"></div>
+        <ul class="status-errors" id="uploadStatusErrors"></ul>
       </div>
 
       <div class="grid" id="grid"></div>
@@ -387,11 +432,60 @@
     const newAlbumPasswordEl = document.getElementById("newAlbumPassword");
     const uploadPublicEl = document.getElementById("uploadPublic");
     const uploadAlbumSelectEl = document.getElementById("uploadAlbumSelect");
+    const uploadStatusStatsEl = document.getElementById("uploadStatusStats");
+    const uploadStatusErrorsEl = document.getElementById("uploadStatusErrors");
+
+    let uploadStatusPollTimer = null;
 
     let albums = [];
 
     function setStatus(text) {
       statusEl.textContent = text || "";
+    }
+
+    function renderUploadStatus(stats) {
+      if (!uploadStatusStatsEl) return;
+      const s = stats || {};
+      const items = [
+        ["Queued", Number(s.queued_total || 0)],
+        ["Processing", Number(s.processing_now || 0)],
+        ["Done", Number(s.completed_total || 0)],
+        ["Failed", Number(s.failed_total || 0)],
+        ["Duplicates", Number(s.duplicate_total || 0)],
+      ];
+
+      uploadStatusStatsEl.innerHTML = items
+        .map(([k, v]) => `<div class="status-pill">${k}<b>${v}</b></div>`)
+        .join("");
+
+      if (!uploadStatusErrorsEl) return;
+      const errs = Array.isArray(s.last_errors) ? s.last_errors.slice(-5).reverse() : [];
+      if (!errs.length) {
+        uploadStatusErrorsEl.innerHTML = "<li>No recent errors</li>";
+        return;
+      }
+      uploadStatusErrorsEl.innerHTML = errs
+        .map((e) => {
+          const t = String(e?.time || "");
+          const stage = String(e?.stage || "unknown");
+          const detail = String(e?.detail || "");
+          return `<li>[${t}] ${stage}: ${detail.replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</li>`;
+        })
+        .join("");
+    }
+
+    async function loadUploadStatus() {
+      try {
+        const data = await apiJson("/api/admin/upload-status");
+        renderUploadStatus(data || {});
+      } catch (e) {
+      }
+    }
+
+    function startUploadStatusPolling() {
+      if (uploadStatusPollTimer) return;
+      loadUploadStatus();
+      uploadStatusPollTimer = setInterval(loadUploadStatus, 2000);
     }
 
     function absUrl(path) {
@@ -967,6 +1061,7 @@
     };
 
     loadList();
+    startUploadStatusPolling();
   </script>
 </body>
 </html>
