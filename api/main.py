@@ -9,12 +9,12 @@ import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from pathlib import Path
-import hashlib
 import json
 import tarfile
 import zipfile
 import threading
 import shutil
+import math
 from werkzeug.utils import secure_filename
 from PIL import ExifTags
 from io import BytesIO
@@ -80,12 +80,21 @@ THUMB_MAX_BYTES = 30 * 1024  # 30KB
 MAX_ARCHIVE_SIZE = 500 * 1024 * 1024  # 500MB
 ARCHIVE_EXTENSIONS = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")
 TRANSCODE_WORKERS = max(1, int(os.environ.get("MIO_GALLERY_TRANSCODE_WORKERS", "2")))
+SIMILARITY_GRID_SIZE = max(8, int(os.environ.get("MIO_GALLERY_SIM_GRID", "12")))
+SIMILARITY_DUP_THRESHOLD = min(0.9999, max(0.90, float(os.environ.get("MIO_GALLERY_DUP_THRESHOLD", "0.993"))))
 
 UPLOAD_TMP_DIR = PHOTO_DIR / ".upload_tmp"
 UPLOAD_TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 _TRANSCODE_POOL = ThreadPoolExecutor(max_workers=TRANSCODE_WORKERS, thread_name_prefix="transcode")
 _UPLOAD_META_LOCK = threading.Lock()
+
+
+class DuplicateImageError(ValueError):
+    def __init__(self, duplicate_of: str, similarity: float):
+        super().__init__(f"Duplicate image (similarity={similarity:.4f})")
+        self.duplicate_of = duplicate_of
+        self.similarity = float(similarity)
 
 
 def _is_admin() -> bool:
@@ -889,32 +898,170 @@ def _temp_upload_path(suffix: str = "") -> Path:
     return UPLOAD_TMP_DIR / f"upload_{token}{suffix}"
 
 
-def _file_md5_12(path: Path) -> str:
-    h = hashlib.md5()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()[:12]
+def _meta_get_similarity_signatures(meta: dict) -> dict:
+    m = meta.get("similarity_signatures") if isinstance(meta, dict) else None
+    return m if isinstance(m, dict) else {}
 
 
-def _reserve_unique_image_id(meta: dict, year_month_dir: Path, photo_date: datetime, file_hash: str) -> str:
-    base = f"{photo_date.strftime('%Y%m%d_%H%M%S')}_{file_hash}"
+def _is_in_subdir(path: Path, subdir: Path) -> bool:
+    try:
+        path.relative_to(subdir)
+        return True
+    except Exception:
+        return False
+
+
+def _pick_canonical_source_file(image_id: str) -> Path | None:
+    files = _find_files_by_id(image_id)
+    if not files:
+        return None
+    blocked_roots = {THUMB_DIR, DOWNLOAD_DIR, DESCRIPTION_DIR, UPLOAD_TMP_DIR}
+    filtered = []
+    for p in files:
+        if any(_is_in_subdir(p, root) for root in blocked_roots):
+            continue
+        filtered.append(p)
+    if not filtered:
+        return None
+    avif = next((p for p in filtered if p.suffix.lower() == ".avif"), None)
+    webp = next((p for p in filtered if p.suffix.lower() == ".webp"), None)
+    return avif or webp or filtered[0]
+
+
+def _build_similarity_signature(path: Path) -> dict:
+    img = _open_image_any(path)
+    try:
+        img = _apply_exif_orientation(img)
+        if img.mode == "P":
+            img = img.convert("RGB")
+        if img.mode in ("RGBA", "LA"):
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[-1])
+            img = bg
+        elif img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+
+        w, h = img.size
+        small = img.convert("L").resize((SIMILARITY_GRID_SIZE, SIMILARITY_GRID_SIZE), Image.Resampling.LANCZOS)
+        vec = [int(x) for x in small.getdata()]
+        return {
+            "w": int(w),
+            "h": int(h),
+            "grid": int(SIMILARITY_GRID_SIZE),
+            "v": vec,
+        }
+    finally:
+        try:
+            img.close()
+        except Exception:
+            pass
+
+
+def _signature_similarity(a: dict, b: dict) -> float:
+    try:
+        va = a.get("v")
+        vb = b.get("v")
+        if not isinstance(va, list) or not isinstance(vb, list) or not va or len(va) != len(vb):
+            return 0.0
+
+        wa = float(a.get("w") or 1.0)
+        ha = float(a.get("h") or 1.0)
+        wb = float(b.get("w") or 1.0)
+        hb = float(b.get("h") or 1.0)
+        ratio_a = wa / max(1.0, ha)
+        ratio_b = wb / max(1.0, hb)
+        ratio_gap = abs(math.log(max(1e-6, ratio_a / max(1e-6, ratio_b))))
+        if ratio_gap > 0.08:
+            return 0.0
+
+        diff = 0.0
+        for i in range(len(va)):
+            diff += abs(float(va[i]) - float(vb[i]))
+        pixel_score = 1.0 - (diff / (len(va) * 255.0))
+        ratio_score = max(0.0, 1.0 - (ratio_gap * 5.0))
+        return max(0.0, min(1.0, pixel_score * ratio_score))
+    except Exception:
+        return 0.0
+
+
+def _collect_existing_image_ids(meta: dict) -> set[str]:
+    ids = set()
+    dt_map = meta.get("datetime") if isinstance(meta, dict) else None
+    if isinstance(dt_map, dict):
+        ids.update(str(k) for k in dt_map.keys() if k)
+
+    for p in PHOTO_DIR.rglob("*"):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in {".webp", ".avif"}:
+            continue
+        if _is_in_subdir(p, THUMB_DIR) or _is_in_subdir(p, DOWNLOAD_DIR) or _is_in_subdir(p, UPLOAD_TMP_DIR):
+            continue
+        ids.add(p.stem)
+    return ids
+
+
+def _get_or_build_signature(image_id: str, signature_map: dict) -> dict | None:
+    existing = signature_map.get(image_id)
+    if isinstance(existing, dict) and isinstance(existing.get("v"), list) and existing.get("v"):
+        return existing
+
+    src = _pick_canonical_source_file(image_id)
+    if not src or not src.exists():
+        return None
+    try:
+        sig = _build_similarity_signature(src)
+        signature_map[image_id] = sig
+        return sig
+    except Exception:
+        return None
+
+
+def _find_duplicate_match(
+    new_signature: dict,
+    signature_map: dict,
+    seen_signatures: list[tuple[str, dict]],
+    existing_ids: set[str],
+) -> tuple[str, float] | None:
+    best_id = None
+    best_score = 0.0
+
+    for seen_id, seen_sig in seen_signatures:
+        score = _signature_similarity(new_signature, seen_sig)
+        if score > best_score:
+            best_score = score
+            best_id = seen_id
+
+    for image_id in existing_ids:
+        ref = _get_or_build_signature(image_id, signature_map)
+        if not ref:
+            continue
+        score = _signature_similarity(new_signature, ref)
+        if score > best_score:
+            best_score = score
+            best_id = image_id
+
+    if best_id and best_score >= SIMILARITY_DUP_THRESHOLD:
+        return best_id, best_score
+    return None
+
+
+def _reserve_unique_image_id(meta: dict, year_month_dir: Path, photo_date: datetime) -> str:
+    base_prefix = photo_date.strftime('%Y%m%d_%H%M%S')
     dt_map = meta.get("datetime")
     if not isinstance(dt_map, dict):
         dt_map = {}
 
-    candidate = base
-    i = 2
-    while (
-        candidate in dt_map
-        or (year_month_dir / f"{candidate}.webp").exists()
-        or (year_month_dir / f"{candidate}.avif").exists()
-        or (UPLOAD_TMP_DIR / f"{candidate}.webp").exists()
-        or (UPLOAD_TMP_DIR / f"{candidate}.avif").exists()
-    ):
-        candidate = f"{base}_{i}"
-        i += 1
-    return candidate
+    while True:
+        candidate = f"{base_prefix}_{os.urandom(6).hex()}"
+        if (
+            candidate not in dt_map
+            and not (year_month_dir / f"{candidate}.webp").exists()
+            and not (year_month_dir / f"{candidate}.avif").exists()
+            and not (UPLOAD_TMP_DIR / f"{candidate}.webp").exists()
+            and not (UPLOAD_TMP_DIR / f"{candidate}.avif").exists()
+        ):
+            return candidate
 
 
 def _cleanup_meta_for_image(image_id: str) -> None:
@@ -934,6 +1081,12 @@ def _cleanup_meta_for_image(image_id: str) -> None:
         if isinstance(image_album, dict) and image_id in image_album:
             image_album.pop(image_id, None)
             meta["image_album"] = image_album
+            changed = True
+
+        similarity = meta.get("similarity_signatures")
+        if isinstance(similarity, dict) and image_id in similarity:
+            similarity.pop(image_id, None)
+            meta["similarity_signatures"] = similarity
             changed = True
 
         if changed:
@@ -961,7 +1114,12 @@ def _background_transcode(temp_path: Path, year_month_dir: Path, image_id: str) 
             pass
 
 
-def _enqueue_single_upload(temp_path: Path, original_filename: str, upload_album_id: str | None) -> dict:
+def _enqueue_single_upload(
+    temp_path: Path,
+    original_filename: str,
+    upload_album_id: str | None,
+    seen_signatures: list[tuple[str, dict]],
+) -> dict:
     ext = (Path(original_filename).suffix or "").lower().lstrip(".")
     if ext not in ALLOWED_EXTENSIONS:
         raise ValueError("File type not allowed")
@@ -974,8 +1132,7 @@ def _enqueue_single_upload(temp_path: Path, original_filename: str, upload_album
     photo_date = _get_exif_datetime(temp_path) or datetime.now()
     year_month_dir = PHOTO_DIR / photo_date.strftime("%Y") / photo_date.strftime("%m")
     year_month_dir.mkdir(parents=True, exist_ok=True)
-
-    file_hash = _file_md5_12(temp_path)
+    new_signature = _build_similarity_signature(temp_path)
 
     image_id = None
     with _UPLOAD_META_LOCK:
@@ -983,7 +1140,15 @@ def _enqueue_single_upload(temp_path: Path, original_filename: str, upload_album
         if not isinstance(meta, dict):
             meta = {}
 
-        image_id = _reserve_unique_image_id(meta, year_month_dir, photo_date, file_hash)
+        signature_map = _meta_get_similarity_signatures(meta)
+        existing_ids = _collect_existing_image_ids(meta)
+
+        duplicate = _find_duplicate_match(new_signature, signature_map, seen_signatures, existing_ids)
+        if duplicate:
+            dup_id, score = duplicate
+            raise DuplicateImageError(dup_id, score)
+
+        image_id = _reserve_unique_image_id(meta, year_month_dir, photo_date)
 
         dt_map = meta.get("datetime")
         if not isinstance(dt_map, dict):
@@ -998,7 +1163,12 @@ def _enqueue_single_upload(temp_path: Path, original_filename: str, upload_album
             image_album[image_id] = upload_album_id
         meta["image_album"] = image_album
 
+        signature_map[image_id] = new_signature
+        meta["similarity_signatures"] = signature_map
+
         _save_meta(meta)
+
+    seen_signatures.append((image_id, new_signature))
 
     try:
         queued_src = _temp_upload_path(Path(original_filename).suffix.lower() or ".img")
@@ -1114,6 +1284,8 @@ def upload_image():
     
     results = []
     errors = []
+    duplicates = []
+    seen_signatures: list[tuple[str, dict]] = []
 
     for file in files:
         filename = (file.filename or "").strip()
@@ -1131,7 +1303,17 @@ def upload_image():
 
                 for extracted_temp, member_name in extracted_files:
                     try:
-                        results.append(_enqueue_single_upload(extracted_temp, member_name, upload_album_id))
+                        results.append(_enqueue_single_upload(extracted_temp, member_name, upload_album_id, seen_signatures))
+                    except DuplicateImageError as dup:
+                        try:
+                            extracted_temp.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        duplicates.append({
+                            'filename': f"{filename}:{member_name}",
+                            'duplicate_of': dup.duplicate_of,
+                            'similarity': round(float(dup.similarity), 4),
+                        })
                     except Exception as exc:
                         try:
                             extracted_temp.unlink(missing_ok=True)
@@ -1147,19 +1329,32 @@ def upload_image():
 
             temp_path = _temp_upload_path(Path(filename).suffix.lower() or ".img")
             file.save(temp_path)
-            results.append(_enqueue_single_upload(temp_path, filename, upload_album_id))
+            results.append(_enqueue_single_upload(temp_path, filename, upload_album_id, seen_signatures))
+        except DuplicateImageError as dup:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            duplicates.append({
+                'filename': filename,
+                'duplicate_of': dup.duplicate_of,
+                'similarity': round(float(dup.similarity), 4),
+            })
         except Exception as e:
             errors.append({'filename': filename, 'error': str(e)})
 
     response = {
         'uploaded': results,
         'queued': len(results),
+        'removed_duplicates': len(duplicates),
         'message': 'Files accepted and queued for background transcoding' if results else 'No files queued'
     }
     if errors:
         response['errors'] = errors
+    if duplicates:
+        response['duplicates'] = duplicates
 
-    status_code = 202 if results else 400
+    status_code = 202 if (results or duplicates) else 400
     return jsonify(response), status_code
 
 @app.route('/api/images', methods=['GET'])
@@ -1559,6 +1754,11 @@ def delete_image(image_id):
         if isinstance(image_album, dict):
             image_album.pop(image_id, None)
             meta["image_album"] = image_album
+
+        similarity = meta.get("similarity_signatures")
+        if isinstance(similarity, dict):
+            similarity.pop(image_id, None)
+            meta["similarity_signatures"] = similarity
 
         _save_meta(meta)
 
