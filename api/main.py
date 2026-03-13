@@ -82,7 +82,7 @@ ARCHIVE_EXTENSIONS = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".
 TRANSCODE_WORKERS = max(1, int(os.environ.get("MIO_GALLERY_TRANSCODE_WORKERS", "2")))
 ARCHIVE_PROCESS_WORKERS = max(1, int(os.environ.get("MIO_GALLERY_ARCHIVE_WORKERS", "1")))
 SIMILARITY_GRID_SIZE = max(8, int(os.environ.get("MIO_GALLERY_SIM_GRID", "12")))
-SIMILARITY_DUP_THRESHOLD = min(0.9999, max(0.90, float(os.environ.get("MIO_GALLERY_DUP_THRESHOLD", "0.993"))))
+SIMILARITY_DUP_THRESHOLD = min(0.9999, max(0.90, float(os.environ.get("MIO_GALLERY_DUP_THRESHOLD", "0.997"))))
 
 UPLOAD_TMP_DIR = PHOTO_DIR / ".upload_tmp"
 UPLOAD_TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -100,6 +100,68 @@ class DuplicateImageError(ValueError):
         super().__init__(f"Duplicate image (similarity={similarity:.4f})")
         self.duplicate_of = duplicate_of
         self.similarity = float(similarity)
+
+
+_UPLOAD_STATUS_LOCK = threading.Lock()
+_UPLOAD_STATUS_MAX_ERRORS = 100
+_UPLOAD_STATUS = {
+    "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "queued_total": 0,
+    "processing_now": 0,
+    "completed_total": 0,
+    "failed_total": 0,
+    "duplicate_total": 0,
+    "archive_queued_total": 0,
+    "archive_processing_now": 0,
+    "archive_completed_total": 0,
+    "archive_failed_total": 0,
+    "last_errors": [],
+}
+
+
+def _status_inc(key: str, by: int = 1):
+    with _UPLOAD_STATUS_LOCK:
+        _UPLOAD_STATUS[key] = int(_UPLOAD_STATUS.get(key, 0)) + int(by)
+
+
+def _status_dec_clamped(key: str, by: int = 1):
+    with _UPLOAD_STATUS_LOCK:
+        _UPLOAD_STATUS[key] = max(0, int(_UPLOAD_STATUS.get(key, 0)) - int(by))
+
+
+def _status_add_error(stage: str, detail: str):
+    with _UPLOAD_STATUS_LOCK:
+        errors = _UPLOAD_STATUS.get("last_errors")
+        if not isinstance(errors, list):
+            errors = []
+        errors.append({
+            "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "stage": str(stage),
+            "detail": str(detail)[:500],
+        })
+        if len(errors) > _UPLOAD_STATUS_MAX_ERRORS:
+            errors = errors[-_UPLOAD_STATUS_MAX_ERRORS:]
+        _UPLOAD_STATUS["last_errors"] = errors
+
+
+def _status_snapshot() -> dict:
+    with _UPLOAD_STATUS_LOCK:
+        s = dict(_UPLOAD_STATUS)
+        errors = s.get("last_errors")
+        s["last_errors"] = list(errors) if isinstance(errors, list) else []
+
+    queued_total = int(s.get("queued_total", 0))
+    completed_total = int(s.get("completed_total", 0))
+    failed_total = int(s.get("failed_total", 0))
+    archive_queued_total = int(s.get("archive_queued_total", 0))
+    archive_completed_total = int(s.get("archive_completed_total", 0))
+    archive_failed_total = int(s.get("archive_failed_total", 0))
+
+    s["pending_total"] = max(0, queued_total - completed_total - failed_total)
+    s["archive_pending_total"] = max(0, archive_queued_total - archive_completed_total - archive_failed_total)
+    s["transcode_workers"] = TRANSCODE_WORKERS
+    s["archive_workers"] = ARCHIVE_PROCESS_WORKERS
+    return s
 
 
 def _is_admin() -> bool:
@@ -982,7 +1044,9 @@ def _handle_chunked_archive_upload(upload_album_id: str | None):
 
     try:
         _ARCHIVE_POOL.submit(_background_process_archive, assembled, original_name, upload_album_id)
+        _status_inc("archive_queued_total", 1)
     except Exception:
+        _status_add_error("archive_queue", f"{original_name}: queue failed")
         try:
             assembled.unlink(missing_ok=True)
         except Exception:
@@ -1000,6 +1064,8 @@ def _handle_chunked_archive_upload(upload_album_id: str | None):
 
 
 def _background_process_archive(archive_path: Path, original_name: str, upload_album_id: str | None) -> None:
+    _status_inc("archive_processing_now", 1)
+    finished_ok = False
     queued = 0
     duplicates = 0
     errors = 0
@@ -1014,12 +1080,14 @@ def _background_process_archive(archive_path: Path, original_name: str, upload_a
                 queued += 1
             except DuplicateImageError:
                 duplicates += 1
+                _status_inc("duplicate_total", 1)
                 try:
                     extracted_temp.unlink(missing_ok=True)
                 except Exception:
                     pass
             except Exception:
                 errors += 1
+                _status_add_error("archive_item", f"{original_name}:{member_name}: enqueue failed")
                 try:
                     extracted_temp.unlink(missing_ok=True)
                 except Exception:
@@ -1033,9 +1101,18 @@ def _background_process_archive(archive_path: Path, original_name: str, upload_a
             errors,
             archive_errors,
         )
+        if archive_errors > 0:
+            _status_add_error("archive_extract", f"{original_name}: {archive_errors} extract errors")
+        finished_ok = True
     except Exception:
+        _status_add_error("archive_process", f"{original_name}: processing exception")
         app.logger.exception("Archive processing failed for %s", original_name)
     finally:
+        if finished_ok:
+            _status_inc("archive_completed_total", 1)
+        else:
+            _status_inc("archive_failed_total", 1)
+        _status_dec_clamped("archive_processing_now", 1)
         try:
             archive_path.unlink(missing_ok=True)
         except Exception:
@@ -1238,9 +1315,13 @@ def _cleanup_meta_for_image(image_id: str) -> None:
 
 
 def _background_transcode(temp_path: Path, year_month_dir: Path, image_id: str) -> None:
+    _status_inc("processing_now", 1)
+    success = False
     try:
         convert_and_save_image(temp_path, year_month_dir, image_id)
+        success = True
     except Exception:
+        _status_add_error("transcode", f"{image_id}: transcode failed")
         app.logger.exception("Transcoding failed for %s", image_id)
         try:
             (year_month_dir / f"{image_id}.webp").unlink(missing_ok=True)
@@ -1252,6 +1333,11 @@ def _background_transcode(temp_path: Path, year_month_dir: Path, image_id: str) 
             pass
         _cleanup_meta_for_image(image_id)
     finally:
+        if success:
+            _status_inc("completed_total", 1)
+        else:
+            _status_inc("failed_total", 1)
+        _status_dec_clamped("processing_now", 1)
         try:
             temp_path.unlink(missing_ok=True)
         except Exception:
@@ -1318,7 +1404,9 @@ def _enqueue_single_upload(
         queued_src = _temp_upload_path(Path(original_filename).suffix.lower() or ".img")
         temp_path.replace(queued_src)
         _TRANSCODE_POOL.submit(_background_transcode, queued_src, year_month_dir, image_id)
+        _status_inc("queued_total", 1)
     except Exception:
+        _status_add_error("enqueue", f"{original_filename}: queue failed")
         if image_id:
             _cleanup_meta_for_image(image_id)
         raise
@@ -1448,12 +1536,14 @@ def upload_image():
 
                 try:
                     _ARCHIVE_POOL.submit(_background_process_archive, archive_temp, filename, upload_album_id)
+                    _status_inc("archive_queued_total", 1)
                     results.append({
                         'original_filename': filename,
                         'queued': True,
                         'archive_processing': True,
                     })
                 except Exception:
+                    _status_add_error("archive_queue", f"{filename}: queue failed")
                     try:
                         archive_temp.unlink(missing_ok=True)
                     except Exception:
@@ -1465,6 +1555,7 @@ def upload_image():
             file.save(temp_path)
             results.append(_enqueue_single_upload(temp_path, filename, upload_album_id, seen_signatures))
         except DuplicateImageError as dup:
+            _status_inc("duplicate_total", 1)
             try:
                 temp_path.unlink(missing_ok=True)
             except Exception:
@@ -1475,6 +1566,7 @@ def upload_image():
                 'similarity': round(float(dup.similarity), 4),
             })
         except Exception as e:
+            _status_add_error("upload", f"{filename}: {e}")
             errors.append({'filename': filename, 'error': str(e)})
 
     response = {
@@ -1490,6 +1582,14 @@ def upload_image():
 
     status_code = 202 if (results or duplicates) else 400
     return jsonify(response), status_code
+
+
+@app.route('/api/admin/upload-status', methods=['GET'])
+def admin_upload_status():
+    auth = _require_admin()
+    if auth:
+        return auth
+    return jsonify(_status_snapshot()), 200
 
 @app.route('/api/images', methods=['GET'])
 def get_images():
