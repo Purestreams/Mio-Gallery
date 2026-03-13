@@ -44,7 +44,7 @@ python main.py
 run in Server mode:
 
 ```zsh
-pip install -r api/requirements.txt && pip install waitress && waitress-serve --host=127.0.0.1 --port=5088 --threads=16 --connection-limit=300 --channel-timeout=120 api.main:app
+pip install -r api/requirements.txt && pip install waitress && waitress-serve --host=0.0.0.0 --port=5088 --threads=16 --connection-limit=300 --channel-timeout=120 api.main:app
 ```
 
 Then open:
