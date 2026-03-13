@@ -7,7 +7,7 @@ import html
 from PIL import ImageOps
 import logging
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 import tarfile
@@ -740,7 +740,7 @@ def admin_albums():
     albums[aid] = {
         "name": name,
         "password_hash": generate_password_hash(password),
-        "created_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     meta["albums"] = albums
     _save_meta(meta)
@@ -894,7 +894,7 @@ def _is_archive_filename(filename: str) -> bool:
 
 def _temp_upload_path(suffix: str = "") -> Path:
     suffix = suffix if suffix.startswith(".") or not suffix else f".{suffix}"
-    token = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}_{os.urandom(4).hex()}"
+    token = f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}_{os.urandom(4).hex()}"
     return UPLOAD_TMP_DIR / f"upload_{token}{suffix}"
 
 
