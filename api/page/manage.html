@@ -716,6 +716,7 @@
       // by issuing multiple HTTP requests in parallel (concurrency-limited).
       const DEFAULT_CONCURRENCY = Math.min(4, Math.max(2, Number(navigator.hardwareConcurrency || 4) >= 8 ? 4 : 3));
       const concurrency = DEFAULT_CONCURRENCY;
+      const ZIP_CHUNK_SIZE = 95 * 1024 * 1024;
 
       // Live speed tracking helpers
       const totalBytes = files.reduce((sum, f) => sum + (f?.size || 0), 0);
@@ -748,41 +749,89 @@
         }
       }
 
+      function isZipFile(file) {
+        const name = (file?.name || "").toLowerCase();
+        return name.endsWith(".zip");
+      }
+
+      function randomUploadId() {
+        if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+        const rand = Math.random().toString(16).slice(2);
+        return `u_${Date.now()}_${rand}`;
+      }
+
+      function sendFormWithProgress(form, file, mapLoaded) {
+        return new Promise((resolve) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", new URL("/api/upload", API_BASE).toString(), true);
+
+          xhr.upload.onprogress = (e) => {
+            if (e && e.lengthComputable) {
+              const absoluteLoaded = typeof mapLoaded === "function" ? mapLoaded(e.loaded, e.total) : e.loaded;
+              onProgress(file, absoluteLoaded, file?.size || 0);
+            }
+          };
+
+          xhr.onreadystatechange = () => {
+            if (xhr.readyState === 4) {
+              const ok = xhr.status >= 200 && xhr.status < 300;
+              resolve({ ok, status: xhr.status, text: xhr.responseText });
+            }
+          };
+
+          xhr.onerror = () => {
+            resolve({ ok: false, status: 0, text: "Network error" });
+          };
+
+          xhr.send(form);
+        });
+      }
+
       async function uploadOneFile(file, attempt = 1) {
         const startedAt = performance.now();
-        const form = new FormData();
-        form.append("image", file);
-        form.append("public", publicFlag ? "1" : "0");
-        if (!publicFlag && chosenAlbum) form.append("album_id", chosenAlbum);
+        const sendNormal = async () => {
+          const form = new FormData();
+          form.append("image", file);
+          form.append("public", publicFlag ? "1" : "0");
+          if (!publicFlag && chosenAlbum) form.append("album_id", chosenAlbum);
+          return await sendFormWithProgress(form, file, (loaded) => loaded);
+        };
 
-        // Use XMLHttpRequest to get upload progress events
-        function sendOnce() {
-          return new Promise((resolve) => {
-            const xhr = new XMLHttpRequest();
-            xhr.open("POST", new URL("/api/upload", API_BASE).toString(), true);
+        const sendZipInChunks = async () => {
+          const totalChunks = Math.ceil((file?.size || 0) / ZIP_CHUNK_SIZE);
+          const uploadId = randomUploadId();
+          let lastRes = { ok: false, status: 0, text: "" };
 
-            xhr.upload.onprogress = (e) => {
-              if (e && e.lengthComputable) {
-                onProgress(file, e.loaded, e.total);
-              }
-            };
+          for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+            const start = chunkIndex * ZIP_CHUNK_SIZE;
+            const end = Math.min(file.size, start + ZIP_CHUNK_SIZE);
+            const blob = file.slice(start, end);
 
-            xhr.onreadystatechange = () => {
-              if (xhr.readyState === 4) {
-                const ok = xhr.status >= 200 && xhr.status < 300;
-                resolve({ ok, status: xhr.status, text: xhr.responseText });
-              }
-            };
+            const form = new FormData();
+            form.append("image", blob, `${file.name}.part${chunkIndex + 1}`);
+            form.append("public", publicFlag ? "1" : "0");
+            if (!publicFlag && chosenAlbum) form.append("album_id", chosenAlbum);
+            form.append("archive_upload_id", uploadId);
+            form.append("archive_original_name", file.name || "upload.zip");
+            form.append("archive_chunk_index", String(chunkIndex));
+            form.append("archive_chunk_total", String(totalChunks));
 
-            xhr.onerror = () => {
-              resolve({ ok: false, status: 0, text: "Network error" });
-            };
+            lastRes = await sendFormWithProgress(
+              form,
+              file,
+              (loaded) => Math.min(file.size, start + loaded)
+            );
 
-            xhr.send(form);
-          });
-        }
+            if (!lastRes.ok) {
+              return lastRes;
+            }
+          }
 
-        const res = await sendOnce();
+          return lastRes;
+        };
+
+        const shouldChunkZip = isZipFile(file) && (file?.size || 0) > ZIP_CHUNK_SIZE;
+        const res = shouldChunkZip ? await sendZipInChunks() : await sendNormal();
         if (!res.ok) {
           const transient = res.status === 408 || res.status === 429 || (res.status >= 500 && res.status <= 599) || res.status === 0;
           if (attempt < 2 && transient) {

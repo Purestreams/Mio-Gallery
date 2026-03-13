@@ -85,6 +85,9 @@ SIMILARITY_DUP_THRESHOLD = min(0.9999, max(0.90, float(os.environ.get("MIO_GALLE
 
 UPLOAD_TMP_DIR = PHOTO_DIR / ".upload_tmp"
 UPLOAD_TMP_DIR.mkdir(parents=True, exist_ok=True)
+ARCHIVE_CHUNK_DIR = UPLOAD_TMP_DIR / "archive_chunks"
+ARCHIVE_CHUNK_DIR.mkdir(parents=True, exist_ok=True)
+ZIP_CHUNK_MAX_SIZE = 95 * 1024 * 1024
 
 _TRANSCODE_POOL = ThreadPoolExecutor(max_workers=TRANSCODE_WORKERS, thread_name_prefix="transcode")
 _UPLOAD_META_LOCK = threading.Lock()
@@ -898,6 +901,133 @@ def _temp_upload_path(suffix: str = "") -> Path:
     return UPLOAD_TMP_DIR / f"upload_{token}{suffix}"
 
 
+def _safe_upload_id(raw: str) -> str:
+    v = secure_filename((raw or "").strip())
+    if not v:
+        raise ValueError("invalid_upload_id")
+    return v
+
+
+def _parse_int_form(name: str, default: int | None = None) -> int | None:
+    v = request.form.get(name)
+    if v is None or str(v).strip() == "":
+        return default
+    try:
+        return int(str(v).strip())
+    except Exception:
+        return None
+
+
+def _handle_chunked_archive_upload(upload_album_id: str | None):
+    upload_id_raw = request.form.get("archive_upload_id")
+    if not upload_id_raw:
+        return None
+
+    upload_id = _safe_upload_id(upload_id_raw)
+    idx = _parse_int_form("archive_chunk_index")
+    total = _parse_int_form("archive_chunk_total")
+    original_name = (request.form.get("archive_original_name") or "archive.zip").strip()
+    ext = Path(original_name).suffix.lower() or ".zip"
+    if ext != ".zip":
+        return jsonify({"error": "chunked_upload_zip_only", "message": "Chunked upload currently supports .zip only"}), 400
+
+    if idx is None or total is None or idx < 0 or total <= 0 or idx >= total:
+        return jsonify({"error": "invalid_chunk_params"}), 400
+
+    if "image" not in request.files:
+        return jsonify({"error": "missing_chunk_file"}), 400
+
+    chunk_file = request.files["image"]
+    upload_dir = ARCHIVE_CHUNK_DIR / upload_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    chunk_path = upload_dir / f"part_{idx:06d}.bin"
+    chunk_file.save(chunk_path)
+
+    chunk_size = chunk_path.stat().st_size
+    if chunk_size > ZIP_CHUNK_MAX_SIZE:
+        try:
+            chunk_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return jsonify({"error": "chunk_too_large", "message": "Each zip chunk must be <= 95MB"}), 400
+
+    existing_parts = {p.name for p in upload_dir.glob("part_*.bin") if p.is_file()}
+    expected_parts = {f"part_{i:06d}.bin" for i in range(total)}
+    missing_count = len(expected_parts - existing_parts)
+
+    if missing_count > 0:
+        return jsonify({
+            "chunk_received": idx + 1,
+            "chunks_total": total,
+            "missing_chunks": missing_count,
+            "completed": False,
+            "message": "Chunk received"
+        }), 202
+
+    assembled = _temp_upload_path(ext)
+    try:
+        with assembled.open("wb") as out:
+            for i in range(total):
+                part = upload_dir / f"part_{i:06d}.bin"
+                with part.open("rb") as inp:
+                    shutil.copyfileobj(inp, out, length=1024 * 1024)
+    finally:
+        try:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    results = []
+    errors = []
+    duplicates = []
+    seen_signatures: list[tuple[str, dict]] = []
+
+    extracted_files, archive_errors = _extract_archive_to_temp_files(assembled)
+    errors.extend(archive_errors)
+    try:
+        assembled.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    for extracted_temp, member_name in extracted_files:
+        try:
+            results.append(_enqueue_single_upload(extracted_temp, member_name, upload_album_id, seen_signatures))
+        except DuplicateImageError as dup:
+            try:
+                extracted_temp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            duplicates.append({
+                'filename': f"{original_name}:{member_name}",
+                'duplicate_of': dup.duplicate_of,
+                'similarity': round(float(dup.similarity), 4),
+            })
+        except Exception as exc:
+            try:
+                extracted_temp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            errors.append({'filename': f"{original_name}:{member_name}", 'error': str(exc)})
+
+    response = {
+        'uploaded': results,
+        'queued': len(results),
+        'removed_duplicates': len(duplicates),
+        'chunks_total': total,
+        'chunk_received': idx + 1,
+        'completed': True,
+        'message': 'Files accepted and queued for background transcoding' if results else 'No files queued'
+    }
+    if errors:
+        response['errors'] = errors
+    if duplicates:
+        response['duplicates'] = duplicates
+
+    status_code = 202 if (results or duplicates) else 400
+    return jsonify(response), status_code
+
+
 def _meta_get_similarity_signatures(meta: dict) -> dict:
     m = meta.get("similarity_signatures") if isinstance(meta, dict) else None
     return m if isinstance(m, dict) else {}
@@ -1275,6 +1405,10 @@ def upload_image():
     if not public_flag and upload_album_id is None and len(albums_for_upload) > 0:
         # UI defaults to private; enforce explicit choice when albums exist.
         return jsonify({"error": "missing_album", "message": "Select an album or mark as public"}), 400
+
+    chunk_resp = _handle_chunked_archive_upload(upload_album_id)
+    if chunk_resp is not None:
+        return chunk_resp
 
     if 'image' not in request.files and 'images' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
