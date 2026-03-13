@@ -375,6 +375,103 @@ def _save_meta(meta: dict):
     tmp.replace(META_PATH)
 
 
+def _parse_meta_datetime(val: str | None) -> datetime | None:
+    if not val:
+        return None
+    try:
+        return datetime.strptime(str(val), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def _iter_gallery_image_ids() -> set[str]:
+    ids = set()
+    if not PHOTO_DIR.exists():
+        return ids
+    for year_dir in PHOTO_DIR.iterdir():
+        if not year_dir.is_dir() or year_dir.name.startswith('.'):
+            continue
+        for month_dir in year_dir.iterdir():
+            if not month_dir.is_dir() or month_dir.name.startswith('.'):
+                continue
+            for p in month_dir.iterdir():
+                if not p.is_file() or p.name.startswith('.'):
+                    continue
+                if p.suffix.lower() not in {".webp", ".avif"}:
+                    continue
+                ids.add(p.stem)
+    return ids
+
+
+def _rebuild_meta_database() -> dict:
+    with _UPLOAD_META_LOCK:
+        meta = _load_meta()
+        if not isinstance(meta, dict):
+            meta = {}
+
+        image_ids = _iter_gallery_image_ids()
+        total_images = len(image_ids)
+
+        albums = _meta_get_albums(meta)
+        valid_album_ids = set(albums.keys())
+
+        old_dt = meta.get("datetime") if isinstance(meta.get("datetime"), dict) else {}
+        old_pinned = meta.get("pinned") if isinstance(meta.get("pinned"), dict) else {}
+        old_image_album = _meta_get_image_album(meta)
+        old_signatures = _meta_get_similarity_signatures(meta)
+
+        new_dt = {}
+        for image_id in sorted(image_ids):
+            dt_obj = _parse_meta_datetime(old_dt.get(image_id) if isinstance(old_dt, dict) else None)
+            if not dt_obj:
+                dt_obj = _extract_datetime_from_id(image_id)
+            if not dt_obj:
+                src = _pick_canonical_source_file(image_id)
+                if src and src.exists():
+                    dt_obj = datetime.fromtimestamp(src.stat().st_mtime)
+            if dt_obj:
+                new_dt[image_id] = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
+
+        new_pinned = {}
+        if isinstance(old_pinned, dict):
+            for image_id, pinned in old_pinned.items():
+                if image_id in image_ids and bool(pinned):
+                    new_pinned[image_id] = True
+
+        new_image_album = {}
+        if isinstance(old_image_album, dict):
+            for image_id, album_id in old_image_album.items():
+                aid = str(album_id).strip() if album_id else None
+                if image_id in image_ids and aid and aid in valid_album_ids:
+                    new_image_album[image_id] = aid
+
+        new_signatures = {}
+        if isinstance(old_signatures, dict):
+            for image_id, sig in old_signatures.items():
+                if image_id not in image_ids:
+                    continue
+                if isinstance(sig, dict) and isinstance(sig.get("v"), list) and sig.get("v"):
+                    new_signatures[image_id] = sig
+
+        rebuilt = {
+            "albums": albums,
+            "datetime": new_dt,
+            "pinned": new_pinned,
+            "image_album": new_image_album,
+            "similarity_signatures": new_signatures,
+        }
+        _save_meta(rebuilt)
+
+    return {
+        "total_images": total_images,
+        "datetime_entries": len(new_dt),
+        "pinned_entries": len(new_pinned),
+        "image_album_entries": len(new_image_album),
+        "signature_entries": len(new_signatures),
+        "album_count": len(albums),
+    }
+
+
 def _find_files_by_id(image_id: str):
     matches = []
     if not PHOTO_DIR.exists():
@@ -1590,6 +1687,19 @@ def admin_upload_status():
     if auth:
         return auth
     return jsonify(_status_snapshot()), 200
+
+
+@app.route('/api/admin/rebuild-database', methods=['POST'])
+def admin_rebuild_database():
+    auth = _require_admin()
+    if auth:
+        return auth
+    try:
+        summary = _rebuild_meta_database()
+        return jsonify({"ok": True, **summary}), 200
+    except Exception as e:
+        app.logger.exception("Failed to rebuild database")
+        return jsonify({"error": "rebuild_failed", "message": str(e)}), 500
 
 @app.route('/api/images', methods=['GET'])
 def get_images():

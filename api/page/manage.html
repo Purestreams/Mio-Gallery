@@ -372,6 +372,7 @@
           <select class="input" id="uploadAlbumSelect" aria-label="Upload album"></select>
           <button class="btn primary" id="uploadBtn">Upload</button>
           <button class="btn" id="refreshBtn">Refresh</button>
+          <button class="btn" id="rebuildDbBtn">Rebuild DB</button>
         </div>
       </div>
 
@@ -780,6 +781,23 @@
     }
 
     document.getElementById("refreshBtn").onclick = loadList;
+    document.getElementById("rebuildDbBtn").onclick = async () => {
+      const btn = document.getElementById("rebuildDbBtn");
+      if (btn) btn.disabled = true;
+      try {
+        setStatus("Rebuilding database…");
+        const data = await apiJson("/api/admin/rebuild-database", { method: "POST" });
+        await loadList();
+        await loadUploadStatus();
+        const total = Number(data?.total_images || 0);
+        const dt = Number(data?.datetime_entries || 0);
+        setStatus(`Database rebuilt: ${total} images, ${dt} datetime entries`);
+      } catch (e) {
+        setStatus("Database rebuild failed");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    };
     document.getElementById("backBtn").onclick = () => {
       window.location.href = "/";
     };
