@@ -80,6 +80,7 @@ THUMB_MAX_BYTES = 30 * 1024  # 30KB
 MAX_ARCHIVE_SIZE = 500 * 1024 * 1024  # 500MB
 ARCHIVE_EXTENSIONS = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")
 TRANSCODE_WORKERS = max(1, int(os.environ.get("MIO_GALLERY_TRANSCODE_WORKERS", "2")))
+ARCHIVE_PROCESS_WORKERS = max(1, int(os.environ.get("MIO_GALLERY_ARCHIVE_WORKERS", "1")))
 SIMILARITY_GRID_SIZE = max(8, int(os.environ.get("MIO_GALLERY_SIM_GRID", "12")))
 SIMILARITY_DUP_THRESHOLD = min(0.9999, max(0.90, float(os.environ.get("MIO_GALLERY_DUP_THRESHOLD", "0.993"))))
 
@@ -90,6 +91,7 @@ ARCHIVE_CHUNK_DIR.mkdir(parents=True, exist_ok=True)
 ZIP_CHUNK_MAX_SIZE = 95 * 1024 * 1024
 
 _TRANSCODE_POOL = ThreadPoolExecutor(max_workers=TRANSCODE_WORKERS, thread_name_prefix="transcode")
+_ARCHIVE_POOL = ThreadPoolExecutor(max_workers=ARCHIVE_PROCESS_WORKERS, thread_name_prefix="archive")
 _UPLOAD_META_LOCK = threading.Lock()
 
 
@@ -978,54 +980,66 @@ def _handle_chunked_archive_upload(upload_album_id: str | None):
         except Exception:
             pass
 
-    results = []
-    errors = []
-    duplicates = []
-    seen_signatures: list[tuple[str, dict]] = []
-
-    extracted_files, archive_errors = _extract_archive_to_temp_files(assembled)
-    errors.extend(archive_errors)
     try:
-        assembled.unlink(missing_ok=True)
+        _ARCHIVE_POOL.submit(_background_process_archive, assembled, original_name, upload_album_id)
     except Exception:
-        pass
-
-    for extracted_temp, member_name in extracted_files:
         try:
-            results.append(_enqueue_single_upload(extracted_temp, member_name, upload_album_id, seen_signatures))
-        except DuplicateImageError as dup:
-            try:
-                extracted_temp.unlink(missing_ok=True)
-            except Exception:
-                pass
-            duplicates.append({
-                'filename': f"{original_name}:{member_name}",
-                'duplicate_of': dup.duplicate_of,
-                'similarity': round(float(dup.similarity), 4),
-            })
-        except Exception as exc:
-            try:
-                extracted_temp.unlink(missing_ok=True)
-            except Exception:
-                pass
-            errors.append({'filename': f"{original_name}:{member_name}", 'error': str(exc)})
+            assembled.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return jsonify({"error": "archive_queue_failed"}), 500
 
-    response = {
-        'uploaded': results,
-        'queued': len(results),
-        'removed_duplicates': len(duplicates),
-        'chunks_total': total,
-        'chunk_received': idx + 1,
-        'completed': True,
-        'message': 'Files accepted and queued for background transcoding' if results else 'No files queued'
-    }
-    if errors:
-        response['errors'] = errors
-    if duplicates:
-        response['duplicates'] = duplicates
+    return jsonify({
+        "chunk_received": idx + 1,
+        "chunks_total": total,
+        "missing_chunks": 0,
+        "completed": True,
+        "archive_processing": True,
+        "message": "Archive assembled and queued for background processing"
+    }), 202
 
-    status_code = 202 if (results or duplicates) else 400
-    return jsonify(response), status_code
+
+def _background_process_archive(archive_path: Path, original_name: str, upload_album_id: str | None) -> None:
+    queued = 0
+    duplicates = 0
+    errors = 0
+    archive_errors = 0
+    seen_signatures: list[tuple[str, dict]] = []
+    try:
+        extracted_files, extract_errors = _extract_archive_to_temp_files(archive_path)
+        archive_errors = len(extract_errors)
+        for extracted_temp, member_name in extracted_files:
+            try:
+                _enqueue_single_upload(extracted_temp, member_name, upload_album_id, seen_signatures)
+                queued += 1
+            except DuplicateImageError:
+                duplicates += 1
+                try:
+                    extracted_temp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            except Exception:
+                errors += 1
+                try:
+                    extracted_temp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        app.logger.info(
+            "Archive processed: %s queued=%s duplicates=%s errors=%s extract_errors=%s",
+            original_name,
+            queued,
+            duplicates,
+            errors,
+            archive_errors,
+        )
+    except Exception:
+        app.logger.exception("Archive processing failed for %s", original_name)
+    finally:
+        try:
+            archive_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _meta_get_similarity_signatures(meta: dict) -> dict:
@@ -1432,33 +1446,19 @@ def upload_image():
                 archive_temp = _temp_upload_path(Path(filename).suffix.lower() or ".archive")
                 file.save(archive_temp)
 
-                extracted_files, archive_errors = _extract_archive_to_temp_files(archive_temp)
-                errors.extend(archive_errors)
-
-                for extracted_temp, member_name in extracted_files:
-                    try:
-                        results.append(_enqueue_single_upload(extracted_temp, member_name, upload_album_id, seen_signatures))
-                    except DuplicateImageError as dup:
-                        try:
-                            extracted_temp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                        duplicates.append({
-                            'filename': f"{filename}:{member_name}",
-                            'duplicate_of': dup.duplicate_of,
-                            'similarity': round(float(dup.similarity), 4),
-                        })
-                    except Exception as exc:
-                        try:
-                            extracted_temp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                        errors.append({'filename': f"{filename}:{member_name}", 'error': str(exc)})
-
                 try:
-                    archive_temp.unlink(missing_ok=True)
+                    _ARCHIVE_POOL.submit(_background_process_archive, archive_temp, filename, upload_album_id)
+                    results.append({
+                        'original_filename': filename,
+                        'queued': True,
+                        'archive_processing': True,
+                    })
                 except Exception:
-                    pass
+                    try:
+                        archive_temp.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    errors.append({'filename': filename, 'error': 'archive_queue_failed'})
                 continue
 
             temp_path = _temp_upload_path(Path(filename).suffix.lower() or ".img")

@@ -41,6 +41,12 @@ pip install -r requirements.txt
 python main.py
 ```
 
+run in Server mode:
+
+```zsh
+pip install -r api/requirements.txt && pip install waitress && waitress-serve --host=127.0.0.1 --port=5088 --threads=16 --connection-limit=300 --channel-timeout=120 api.main:app
+```
+
 Then open:
 - Gallery: `http://localhost:5088/`
 - Admin: `http://localhost:5088/manage` (redirects to login)
