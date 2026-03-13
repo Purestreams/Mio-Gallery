@@ -11,11 +11,16 @@ from datetime import datetime
 from pathlib import Path
 import hashlib
 import json
+import tarfile
+import zipfile
+import threading
+import shutil
 from werkzeug.utils import secure_filename
 from PIL import ExifTags
 from io import BytesIO
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     import pillow_avif  # noqa: F401
@@ -72,6 +77,15 @@ RAW_EXTENSIONS = {"cr2", "cr3", "nef", "arw", "orf", "raf", "rw2", "srw", "dng",
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'webp', 'heic', 'heif', *RAW_EXTENSIONS}
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 THUMB_MAX_BYTES = 30 * 1024  # 30KB
+MAX_ARCHIVE_SIZE = 500 * 1024 * 1024  # 500MB
+ARCHIVE_EXTENSIONS = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")
+TRANSCODE_WORKERS = max(1, int(os.environ.get("MIO_GALLERY_TRANSCODE_WORKERS", "2")))
+
+UPLOAD_TMP_DIR = PHOTO_DIR / ".upload_tmp"
+UPLOAD_TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+_TRANSCODE_POOL = ThreadPoolExecutor(max_workers=TRANSCODE_WORKERS, thread_name_prefix="transcode")
+_UPLOAD_META_LOCK = threading.Lock()
 
 
 def _is_admin() -> bool:
@@ -863,12 +877,217 @@ def convert_and_save_image(image_path, output_dir, base_name):
 
     return results
 
+
+def _is_archive_filename(filename: str) -> bool:
+    lower = (filename or "").lower()
+    return any(lower.endswith(ext) for ext in ARCHIVE_EXTENSIONS)
+
+
+def _temp_upload_path(suffix: str = "") -> Path:
+    suffix = suffix if suffix.startswith(".") or not suffix else f".{suffix}"
+    token = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}_{os.urandom(4).hex()}"
+    return UPLOAD_TMP_DIR / f"upload_{token}{suffix}"
+
+
+def _file_md5_12(path: Path) -> str:
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()[:12]
+
+
+def _reserve_unique_image_id(meta: dict, year_month_dir: Path, photo_date: datetime, file_hash: str) -> str:
+    base = f"{photo_date.strftime('%Y%m%d_%H%M%S')}_{file_hash}"
+    dt_map = meta.get("datetime")
+    if not isinstance(dt_map, dict):
+        dt_map = {}
+
+    candidate = base
+    i = 2
+    while (
+        candidate in dt_map
+        or (year_month_dir / f"{candidate}.webp").exists()
+        or (year_month_dir / f"{candidate}.avif").exists()
+        or (UPLOAD_TMP_DIR / f"{candidate}.webp").exists()
+        or (UPLOAD_TMP_DIR / f"{candidate}.avif").exists()
+    ):
+        candidate = f"{base}_{i}"
+        i += 1
+    return candidate
+
+
+def _cleanup_meta_for_image(image_id: str) -> None:
+    with _UPLOAD_META_LOCK:
+        meta = _load_meta()
+        if not isinstance(meta, dict):
+            return
+
+        changed = False
+        dt_map = meta.get("datetime")
+        if isinstance(dt_map, dict) and image_id in dt_map:
+            dt_map.pop(image_id, None)
+            meta["datetime"] = dt_map
+            changed = True
+
+        image_album = meta.get("image_album")
+        if isinstance(image_album, dict) and image_id in image_album:
+            image_album.pop(image_id, None)
+            meta["image_album"] = image_album
+            changed = True
+
+        if changed:
+            _save_meta(meta)
+
+
+def _background_transcode(temp_path: Path, year_month_dir: Path, image_id: str) -> None:
+    try:
+        convert_and_save_image(temp_path, year_month_dir, image_id)
+    except Exception:
+        app.logger.exception("Transcoding failed for %s", image_id)
+        try:
+            (year_month_dir / f"{image_id}.webp").unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            (year_month_dir / f"{image_id}.avif").unlink(missing_ok=True)
+        except Exception:
+            pass
+        _cleanup_meta_for_image(image_id)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _enqueue_single_upload(temp_path: Path, original_filename: str, upload_album_id: str | None) -> dict:
+    ext = (Path(original_filename).suffix or "").lower().lstrip(".")
+    if ext not in ALLOWED_EXTENSIONS:
+        raise ValueError("File type not allowed")
+    if ext in RAW_EXTENSIONS and rawpy is None:
+        raise ValueError("RAW support requires rawpy to be installed on the server")
+
+    if temp_path.stat().st_size > MAX_FILE_SIZE:
+        raise ValueError("File too large (max 50MB)")
+
+    photo_date = _get_exif_datetime(temp_path) or datetime.now()
+    year_month_dir = PHOTO_DIR / photo_date.strftime("%Y") / photo_date.strftime("%m")
+    year_month_dir.mkdir(parents=True, exist_ok=True)
+
+    file_hash = _file_md5_12(temp_path)
+
+    image_id = None
+    with _UPLOAD_META_LOCK:
+        meta = _load_meta()
+        if not isinstance(meta, dict):
+            meta = {}
+
+        image_id = _reserve_unique_image_id(meta, year_month_dir, photo_date, file_hash)
+
+        dt_map = meta.get("datetime")
+        if not isinstance(dt_map, dict):
+            dt_map = {}
+        dt_map[image_id] = photo_date.strftime("%Y-%m-%d %H:%M:%S")
+        meta["datetime"] = dt_map
+
+        image_album = _meta_get_image_album(meta)
+        if upload_album_id is None:
+            image_album.pop(image_id, None)
+        else:
+            image_album[image_id] = upload_album_id
+        meta["image_album"] = image_album
+
+        _save_meta(meta)
+
+    try:
+        queued_src = _temp_upload_path(Path(original_filename).suffix.lower() or ".img")
+        temp_path.replace(queued_src)
+        _TRANSCODE_POOL.submit(_background_transcode, queued_src, year_month_dir, image_id)
+    except Exception:
+        if image_id:
+            _cleanup_meta_for_image(image_id)
+        raise
+
+    rel_dir = year_month_dir.relative_to(PHOTO_DIR)
+    return {
+        "id": image_id,
+        "original_filename": original_filename,
+        "date": photo_date.strftime("%Y-%m-%d"),
+        "datetime": photo_date.strftime("%Y-%m-%d %H:%M:%S"),
+        "queued": True,
+        "thumb": f"/api/thumb/{image_id}.webp",
+        "webp": f"/api/images/{rel_dir}/{image_id}.webp",
+        "avif": f"/api/images/{rel_dir}/{image_id}.avif",
+    }
+
+
+def _extract_archive_to_temp_files(archive_path: Path) -> tuple[list[tuple[Path, str]], list[dict]]:
+    extracted: list[tuple[Path, str]] = []
+    errors: list[dict] = []
+    archive_name = archive_path.name
+
+    if archive_path.stat().st_size > MAX_ARCHIVE_SIZE:
+        return extracted, [{"filename": archive_name, "error": "Archive too large (max 500MB)"}]
+
+    lower = archive_name.lower()
+
+    def _add_member(stream, member_name: str, declared_size: int | None):
+        name = Path(member_name or "").name
+        if not name:
+            return
+        if not allowed_file(name):
+            errors.append({"filename": f"{archive_name}:{member_name}", "error": "File type not allowed"})
+            return
+        if declared_size is not None and declared_size > MAX_FILE_SIZE:
+            errors.append({"filename": f"{archive_name}:{member_name}", "error": "File too large (max 50MB)"})
+            return
+
+        tmp = _temp_upload_path(Path(name).suffix.lower() or ".img")
+        try:
+            with tmp.open("wb") as out:
+                shutil.copyfileobj(stream, out, length=1024 * 1024)
+            if tmp.stat().st_size > MAX_FILE_SIZE:
+                tmp.unlink(missing_ok=True)
+                errors.append({"filename": f"{archive_name}:{member_name}", "error": "File too large (max 50MB)"})
+                return
+            extracted.append((tmp, name))
+        except Exception as exc:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            errors.append({"filename": f"{archive_name}:{member_name}", "error": str(exc)})
+
+    try:
+        if lower.endswith(".zip"):
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    with zf.open(info, "r") as src:
+                        _add_member(src, info.filename, info.file_size)
+        else:
+            with tarfile.open(archive_path, mode="r:*") as tf:
+                for member in tf.getmembers():
+                    if not member.isfile():
+                        continue
+                    src = tf.extractfile(member)
+                    if src is None:
+                        continue
+                    with src:
+                        _add_member(src, member.name, int(member.size) if member.size is not None else None)
+    except Exception as exc:
+        errors.append({"filename": archive_name, "error": f"Archive read failed: {exc}"})
+
+    return extracted, errors
+
 @app.route('/api/upload', methods=['POST'])
 def upload_image():
     """
     POST API to upload images
     Accepts: multipart/form-data with 'image' or 'images' field
-    Returns: JSON with uploaded image paths
+    Returns: JSON after files are accepted and queued for background transcoding
     """
     auth = _require_admin()
     if auth:
@@ -895,88 +1114,52 @@ def upload_image():
     
     results = []
     errors = []
-    
+
     for file in files:
-        if file.filename == '':
+        filename = (file.filename or "").strip()
+        if not filename:
             errors.append({'filename': 'empty', 'error': 'No selected file'})
             continue
-        
-        if not allowed_file(file.filename):
-            errors.append({'filename': file.filename, 'error': 'File type not allowed'})
-            continue
 
-        ext = file.filename.rsplit('.', 1)[1].lower()
-        if ext in RAW_EXTENSIONS and rawpy is None:
-            errors.append({'filename': file.filename, 'error': 'RAW support requires rawpy to be installed on the server'})
-            continue
-        
         try:
-            # Save original file temporarily
-            temp_path = PHOTO_DIR / f"temp_{secure_filename(file.filename)}"
-            file.save(temp_path)
-            
-            # Check file size
-            if os.path.getsize(temp_path) > MAX_FILE_SIZE:
-                os.remove(temp_path)
-                errors.append({'filename': file.filename, 'error': 'File too large (max 50MB)'})
+            if _is_archive_filename(filename):
+                archive_temp = _temp_upload_path(Path(filename).suffix.lower() or ".archive")
+                file.save(archive_temp)
+
+                extracted_files, archive_errors = _extract_archive_to_temp_files(archive_temp)
+                errors.extend(archive_errors)
+
+                for extracted_temp, member_name in extracted_files:
+                    try:
+                        results.append(_enqueue_single_upload(extracted_temp, member_name, upload_album_id))
+                    except Exception as exc:
+                        try:
+                            extracted_temp.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        errors.append({'filename': f"{filename}:{member_name}", 'error': str(exc)})
+
+                try:
+                    archive_temp.unlink(missing_ok=True)
+                except Exception:
+                    pass
                 continue
-            
-            upload_dt = datetime.now()
-            exif_dt = _get_exif_datetime(temp_path)
-            photo_date = exif_dt or upload_dt
-            
-            # Create directory structure: photo/YYYY/MM/
-            year_month_dir = PHOTO_DIR / photo_date.strftime("%Y") / photo_date.strftime("%m")
-            year_month_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Generate unique filename using hash
-            with open(temp_path, 'rb') as f:
-                file_hash = hashlib.md5(f.read()).hexdigest()[:12]
-            
-            base_name = f"{photo_date.strftime('%Y%m%d_%H%M%S')}_{file_hash}"
-            
-            # Convert and save
-            converted_paths = convert_and_save_image(temp_path, year_month_dir, base_name)
 
-            # Persist datetime for display (EXIF preferred; upload time fallback)
-            meta = _load_meta()
-            if not isinstance(meta, dict):
-                meta = {}
-            dt_map = meta.get("datetime")
-            if not isinstance(dt_map, dict):
-                dt_map = {}
-            dt_map[base_name] = photo_date.strftime("%Y-%m-%d %H:%M:%S")
-            meta["datetime"] = dt_map
-
-            # Persist album assignment (optional)
-            if upload_album_id is not None:
-                image_album = _meta_get_image_album(meta)
-                image_album[base_name] = upload_album_id
-                meta["image_album"] = image_album
-
-            _save_meta(meta)
-            
-            # Remove temp file
-            os.remove(temp_path)
-            
-            results.append({
-                'original_filename': file.filename,
-                'date': photo_date.strftime("%Y-%m-%d"),
-                'datetime': photo_date.strftime("%Y-%m-%d %H:%M:%S"),
-                'webp': f"/api/images/{converted_paths['webp']}",
-                'avif': f"/api/images/{converted_paths['avif']}" if converted_paths['avif'] else None
-            })
-            
+            temp_path = _temp_upload_path(Path(filename).suffix.lower() or ".img")
+            file.save(temp_path)
+            results.append(_enqueue_single_upload(temp_path, filename, upload_album_id))
         except Exception as e:
-            if temp_path.exists():
-                os.remove(temp_path)
-            errors.append({'filename': file.filename, 'error': str(e)})
-    
-    response = {'uploaded': results}
+            errors.append({'filename': filename, 'error': str(e)})
+
+    response = {
+        'uploaded': results,
+        'queued': len(results),
+        'message': 'Files accepted and queued for background transcoding' if results else 'No files queued'
+    }
     if errors:
         response['errors'] = errors
-    
-    status_code = 200 if results else 400
+
+    status_code = 202 if results else 400
     return jsonify(response), status_code
 
 @app.route('/api/images', methods=['GET'])
